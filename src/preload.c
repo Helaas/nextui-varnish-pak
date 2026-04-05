@@ -24,6 +24,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <time.h>
 
 #include "varnish_shm.h"
 
@@ -100,11 +101,21 @@ static void     *base_frame_renderer;
 static int       base_frame_w;
 static int       base_frame_h;
 static int       base_frame_valid;
+static uint64_t  base_frame_captured_at_ms;
 
 /* ── Init helpers ───────────────────────────────────────────────── */
 
 static pid_t current_tid(void) {
     return (pid_t)syscall(SYS_gettid);
+}
+
+static uint64_t monotonic_ms(void) {
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
 static void init_sdl_funcs(void) {
@@ -284,20 +295,17 @@ static void draw_slot(void *renderer, int idx) {
     pfn_RenderCopy(renderer, slot_texture[idx], NULL, &dst);
 }
 
-static void draw_all_overlays(void *renderer) {
-    int order[VARNISH_MAX_SLOTS];
+static int collect_active_slots(int *order) {
     int count = 0;
     int i, j;
 
     if (!shm || !shm_ok) {
-        if (shm_fd >= 0) return;           /* already tried and failed hard */
+        if (shm_fd >= 0) return 0;
         init_shm();
-        if (!shm_ok) return;
+        if (!shm_ok) return 0;
     }
 
-    /* Collect active slot indices and sort by z_order (insertion sort, N<=8) */
     for (i = 0; i < VARNISH_MAX_SLOTS; i++) {
-        /* Refresh cache first to know which are active */
         slot_refresh_cache(i);
         if (slot_cached_active[i])
             order[count++] = i;
@@ -314,9 +322,19 @@ static void draw_all_overlays(void *renderer) {
         order[j + 1] = key;
     }
 
+    return count;
+}
+
+static int draw_all_overlays(void *renderer) {
+    int order[VARNISH_MAX_SLOTS];
+    int count = collect_active_slots(order);
+    int i;
+
     /* Draw slots in z_order (lowest first) */
     for (i = 0; i < count; i++)
         draw_slot(renderer, order[i]);
+
+    return count;
 }
 
 /* ── Base-frame capture / replay ───────────────────────────────── */
@@ -329,6 +347,7 @@ static void discard_base_frame_texture(void) {
     base_frame_w = 0;
     base_frame_h = 0;
     base_frame_valid = 0;
+    base_frame_captured_at_ms = 0;
 }
 
 static int ensure_base_frame_pixels(size_t pixel_count) {
@@ -399,6 +418,7 @@ static void capture_base_frame(void *renderer) {
         return;
 
     base_frame_valid = 1;
+    base_frame_captured_at_ms = monotonic_ms();
 }
 
 static int replay_base_frame(void *renderer) {
@@ -456,6 +476,10 @@ static void maybe_force_idle_present(void) {
 /* ── SDL_RenderPresent interposition ────────────────────────────── */
 
 void SDL_RenderPresent(void *renderer) {
+    int overlay_count = 0;
+    uint64_t now_ms;
+    int should_capture = 0;
+
     if (__builtin_expect(!real_present, 0)) {
         real_present = (fn_SDL_RenderPresent)dlsym(RTLD_NEXT, "SDL_RenderPresent");
         if (!real_present) return;
@@ -465,7 +489,16 @@ void SDL_RenderPresent(void *renderer) {
     last_renderer = renderer;
     render_tid = current_tid();
 
-    capture_base_frame(renderer);
+    overlay_count = collect_active_slots((int [VARNISH_MAX_SLOTS]){0});
+    now_ms = monotonic_ms();
+    should_capture = !base_frame_valid || overlay_count > 0;
+    if (!should_capture && now_ms > 0 &&
+        (!base_frame_captured_at_ms ||
+         now_ms - base_frame_captured_at_ms >= 250u)) {
+        should_capture = 1;
+    }
+    if (should_capture)
+        capture_base_frame(renderer);
 
     /* Draw overlays INTO the renderer before presenting */
     if (__builtin_expect(sdl_funcs_ok, 1))
