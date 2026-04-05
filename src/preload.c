@@ -18,6 +18,7 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/syscall.h>
@@ -37,19 +38,23 @@
 typedef void  (*fn_SDL_RenderPresent)(void *);
 typedef void  (*fn_SDL_Delay)(uint32_t);
 typedef int   (*fn_SDL_PollEvent)(void *);
+typedef int   (*fn_SDL_GetRendererOutputSize)(void *, int *, int *);
 typedef void *(*fn_SDL_CreateTexture)(void *, uint32_t, int, int, int);
 typedef int   (*fn_SDL_UpdateTexture)(void *, const void *, const void *, int);
 typedef int   (*fn_SDL_SetTextureBlendMode)(void *, int);
 typedef int   (*fn_SDL_RenderCopy)(void *, void *, const void *, const void *);
+typedef int   (*fn_SDL_RenderReadPixels)(void *, const void *, uint32_t, void *, int);
 typedef void  (*fn_SDL_DestroyTexture)(void *);
 
 static fn_SDL_RenderPresent       real_present;
 static fn_SDL_Delay               real_delay;
 static fn_SDL_PollEvent           real_poll_event;
+static fn_SDL_GetRendererOutputSize pfn_GetRendererOutputSize;
 static fn_SDL_CreateTexture       pfn_CreateTexture;
 static fn_SDL_UpdateTexture       pfn_UpdateTexture;
 static fn_SDL_SetTextureBlendMode pfn_SetBlendMode;
 static fn_SDL_RenderCopy          pfn_RenderCopy;
+static fn_SDL_RenderReadPixels    pfn_RenderReadPixels;
 static fn_SDL_DestroyTexture      pfn_DestroyTexture;
 static int sdl_funcs_ok;
 
@@ -86,6 +91,16 @@ static pid_t render_tid = -1;
 static uint32_t last_present_frame_ids[VARNISH_MAX_SLOTS];
 static __thread int force_present_guard;
 
+/* ── Cached base-frame replay for idle overlay presents ────────── */
+
+static uint32_t *base_frame_pixels;
+static size_t    base_frame_capacity;
+static void     *base_frame_texture;
+static void     *base_frame_renderer;
+static int       base_frame_w;
+static int       base_frame_h;
+static int       base_frame_valid;
+
 /* ── Init helpers ───────────────────────────────────────────────── */
 
 static pid_t current_tid(void) {
@@ -95,10 +110,12 @@ static pid_t current_tid(void) {
 static void init_sdl_funcs(void) {
     real_delay       = (fn_SDL_Delay)dlsym(RTLD_NEXT, "SDL_Delay");
     real_poll_event  = (fn_SDL_PollEvent)dlsym(RTLD_NEXT, "SDL_PollEvent");
+    pfn_GetRendererOutputSize = (fn_SDL_GetRendererOutputSize)dlsym(RTLD_NEXT, "SDL_GetRendererOutputSize");
     pfn_CreateTexture = (fn_SDL_CreateTexture)dlsym(RTLD_NEXT, "SDL_CreateTexture");
     pfn_UpdateTexture = (fn_SDL_UpdateTexture)dlsym(RTLD_NEXT, "SDL_UpdateTexture");
     pfn_SetBlendMode  = (fn_SDL_SetTextureBlendMode)dlsym(RTLD_NEXT, "SDL_SetTextureBlendMode");
     pfn_RenderCopy    = (fn_SDL_RenderCopy)dlsym(RTLD_NEXT, "SDL_RenderCopy");
+    pfn_RenderReadPixels = (fn_SDL_RenderReadPixels)dlsym(RTLD_NEXT, "SDL_RenderReadPixels");
     pfn_DestroyTexture = (fn_SDL_DestroyTexture)dlsym(RTLD_NEXT, "SDL_DestroyTexture");
 
     sdl_funcs_ok = pfn_CreateTexture && pfn_UpdateTexture &&
@@ -302,6 +319,98 @@ static void draw_all_overlays(void *renderer) {
         draw_slot(renderer, order[i]);
 }
 
+/* ── Base-frame capture / replay ───────────────────────────────── */
+
+static void discard_base_frame_texture(void) {
+    if (base_frame_texture && pfn_DestroyTexture)
+        pfn_DestroyTexture(base_frame_texture);
+    base_frame_texture = NULL;
+    base_frame_renderer = NULL;
+    base_frame_w = 0;
+    base_frame_h = 0;
+    base_frame_valid = 0;
+}
+
+static int ensure_base_frame_pixels(size_t pixel_count) {
+    uint32_t *pixels;
+
+    if (pixel_count == 0) return 0;
+    if (pixel_count <= base_frame_capacity) return 1;
+
+    pixels = (uint32_t *)realloc(base_frame_pixels, pixel_count * sizeof(uint32_t));
+    if (!pixels) return 0;
+
+    base_frame_pixels = pixels;
+    base_frame_capacity = pixel_count;
+    return 1;
+}
+
+static int ensure_base_frame_texture(void *renderer, int width, int height) {
+    if (!pfn_CreateTexture || !pfn_UpdateTexture || !renderer ||
+        width <= 0 || height <= 0)
+        return 0;
+
+    if (base_frame_texture &&
+        (base_frame_renderer != renderer ||
+         base_frame_w != width ||
+         base_frame_h != height)) {
+        discard_base_frame_texture();
+    }
+
+    if (!base_frame_texture) {
+        base_frame_texture = pfn_CreateTexture(
+            renderer, VR_SDL_PIXELFORMAT_ARGB8888,
+            VR_SDL_TEXTUREACCESS_STREAMING,
+            width, height);
+        if (!base_frame_texture)
+            return 0;
+        base_frame_renderer = renderer;
+        base_frame_w = width;
+        base_frame_h = height;
+    }
+
+    return 1;
+}
+
+static void capture_base_frame(void *renderer) {
+    int width, height;
+    size_t pixel_count;
+
+    if (!renderer || !pfn_GetRendererOutputSize || !pfn_RenderReadPixels)
+        return;
+
+    if (pfn_GetRendererOutputSize(renderer, &width, &height) != 0 ||
+        width <= 0 || height <= 0)
+        return;
+
+    pixel_count = (size_t)width * (size_t)height;
+    if (!ensure_base_frame_pixels(pixel_count))
+        return;
+    if (!ensure_base_frame_texture(renderer, width, height))
+        return;
+
+    if (pfn_RenderReadPixels(renderer, NULL, VR_SDL_PIXELFORMAT_ARGB8888,
+                             base_frame_pixels,
+                             width * (int)sizeof(uint32_t)) != 0)
+        return;
+
+    if (pfn_UpdateTexture(base_frame_texture, NULL, base_frame_pixels,
+                          width * (int)sizeof(uint32_t)) != 0)
+        return;
+
+    base_frame_valid = 1;
+}
+
+static int replay_base_frame(void *renderer) {
+    if (!base_frame_valid || !renderer || !pfn_RenderCopy)
+        return 0;
+    if (!base_frame_texture || base_frame_renderer != renderer)
+        return 0;
+
+    pfn_RenderCopy(renderer, base_frame_texture, NULL, NULL);
+    return 1;
+}
+
 /* ── Idle-present forcing ──────────────────────────────────────── */
 
 static void maybe_force_idle_present(void) {
@@ -332,6 +441,10 @@ static void maybe_force_idle_present(void) {
     if (!need_present) return;
 
     force_present_guard = 1;
+    if (!replay_base_frame(last_renderer)) {
+        force_present_guard = 0;
+        return;
+    }
     if (__builtin_expect(sdl_funcs_ok, 1))
         draw_all_overlays(last_renderer);
     real_present(last_renderer);
@@ -351,6 +464,8 @@ void SDL_RenderPresent(void *renderer) {
 
     last_renderer = renderer;
     render_tid = current_tid();
+
+    capture_base_frame(renderer);
 
     /* Draw overlays INTO the renderer before presenting */
     if (__builtin_expect(sdl_funcs_ok, 1))

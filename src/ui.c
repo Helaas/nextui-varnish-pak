@@ -11,7 +11,7 @@
 
 #include <stdio.h>
 
-static void show_error(const char *message) {
+static void show_message(const char *message) {
     ap_footer_item footer[] = {
         { .button = AP_BTN_A, .label = "OK", .is_confirm = true },
     };
@@ -22,6 +22,10 @@ static void show_error(const char *message) {
     };
     ap_confirm_result result = {0};
     (void)ap_confirmation(&opts, &result);
+}
+
+static void show_error(const char *message) {
+    show_message(message);
 }
 
 static bool show_confirm(const char *message, const char *confirm_label) {
@@ -97,16 +101,22 @@ int ui_run(const char *self_path) {
         want_enabled = (result.items[0].selected_option == 1);
 
         if (!want_enabled) {
-            if (!show_confirm("Disable Varnish?\n\nThis removes the boot hook and stops the running daemon immediately.\nThe preload wrapper stays installed.",
+            if (!show_confirm("Disable Varnish?\n\nThis removes the startup patch and boot hook, then stops the running daemon.\nReboot to fully unload the current launcher session.",
                               "Disable")) {
                 continue;
             }
-            if (control_disable(&status) != 0)
+            if (control_disable(&status) != 0) {
                 show_state_error("Could not fully disable Varnish.", &status);
+            } else {
+                show_message("Varnish disabled.\n\nReboot to fully unload the current launcher session.");
+            }
             continue;
         }
 
-        if (control_enable(self_path, &status) != 0)
+        if (control_enable(self_path, &status) != 0) {
             show_state_error("Could not fully enable Varnish.", &status);
+        } else {
+            show_message("Varnish enabled.\n\nReboot to inject LD_PRELOAD into the current launcher session.");
+        }
     }
 }

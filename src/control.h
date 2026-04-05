@@ -9,8 +9,8 @@
 #include <stddef.h>
 
 typedef struct {
-    bool preload_supported;
-    bool preload_installed;
+    bool enabled;
+    bool startup_installed;
     bool boot_installed;
     bool daemon_running;
 } varnish_status;

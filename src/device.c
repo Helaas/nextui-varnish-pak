@@ -104,6 +104,12 @@ void device_get_system_bin_path(char *out, size_t size) {
 }
 
 void device_get_pak_dir(char *out, size_t size) {
+    const char *pak_dir = getenv("PAK_DIR");
+    if (pak_dir && pak_dir[0]) {
+        str_copy_trunc(out, size, pak_dir);
+        return;
+    }
+
 #ifndef PLATFORM_MAC
     const char *sd = getenv("SDCARD_PATH");
     if (!sd || !sd[0]) sd = "/mnt/SDCARD";
@@ -121,7 +127,15 @@ void device_get_pak_dir(char *out, size_t size) {
     }
     snprintf(out, size, "%s/Tools/%s/Varnish.pak", sd, platform);
 #else
-    out[0] = '\0';
+    const char *sd = getenv("SDCARD_PATH");
+    const char *platform = getenv("PLATFORM");
+
+    if (!sd || !sd[0] || !platform || !platform[0]) {
+        out[0] = '\0';
+        return;
+    }
+
+    snprintf(out, size, "%s/Tools/%s/Varnish.pak", sd, platform);
 #endif
 }
 

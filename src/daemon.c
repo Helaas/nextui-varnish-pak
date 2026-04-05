@@ -7,7 +7,6 @@
 
 #include "daemon.h"
 #include "device.h"
-#include "hooks.h"
 #include "ipc.h"
 #include "overlay.h"
 #include "shm.h"
@@ -18,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -208,6 +208,34 @@ static void signal_handler(int sig) {
 }
 
 /* ── Daemonize ─────────────────────────────────────────────────── */
+
+int daemon_spawn_background(const char *self_path) {
+    pid_t pid;
+    int status;
+
+    if (!self_path || !self_path[0]) return -1;
+
+    pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        pid_t grandchild = fork();
+        char *const argv[] = { (char *)self_path, "--daemon", NULL };
+
+        if (grandchild < 0) _exit(127);
+        if (grandchild > 0) _exit(0);
+
+        setsid();
+        execvp(self_path, argv);
+        _exit(127);
+    }
+
+    if (waitpid(pid, &status, 0) < 0)
+        return -1;
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return -1;
+
+    return 0;
+}
 
 static void daemonize(void) {
 #ifdef __linux__

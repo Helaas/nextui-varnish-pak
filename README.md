@@ -129,23 +129,25 @@ Launching `Varnish.pak` now opens a small management UI instead of auto-installi
 
 The UI exposes a single `Enabled` toggle with live status:
 
-- `Preload hook: Installed/Missing`
-- `Boot hook: Enabled/Disabled`
+- `Startup patch: Installed/Missing`
+- `Boot hook: Installed/Missing`
 - `Daemon: Running/Stopped`
 
 Saving `Enabled = On`:
 
-1. Installs the `nextui.elf` preload wrapper if needed
-2. Writes `$USERDATA_PATH/.hooks/boot.d/varnish.sh`
-3. Starts the daemon immediately if it is not already running
+1. Writes `~/.userdata/<platform>/Varnish/enabled`
+2. Patches `.tmp_update/<platform>.sh` so the NextUI boot chain exports `LD_PRELOAD`
+3. Writes `~/.userdata/<platform>/.hooks/boot.d/varnish.sync.sh`
+4. Starts the daemon immediately if it is not already running
 
 Saving `Enabled = Off`:
 
-1. Removes the boot hook
-2. Stops the running daemon immediately
-3. Leaves the preload wrapper in place so re-enabling is fast
+1. Removes the enabled marker
+2. Removes the startup patch
+3. Removes the boot hook
+4. Stops the running daemon immediately
 
-`Disabled` is a soft disable, not a full uninstall.
+Both operations require a reboot for the current launcher session to fully pick up the change.
 
 ---
 
@@ -155,11 +157,34 @@ Saving `Enabled = Off`:
 |---|---|
 | `varnish --ui` | Open the management UI |
 | `varnish --daemon` | Start the daemon directly |
-| `varnish --install` | Install preload + boot hooks without starting the UI |
+| `varnish --install` | Enable startup wiring and start the daemon |
 | `varnish --kill` | Stop the running daemon |
-| `varnish --uninstall` | Full uninstall: stop daemon, remove boot hook, and restore `nextui.elf` |
+| `varnish --uninstall` | Disable startup wiring and stop the daemon |
 
-Running `varnish` with no arguments still performs the original install + daemon start flow for direct CLI compatibility.
+Running `varnish` with no arguments behaves the same as `varnish --install`.
+
+---
+
+## Developer Notes
+
+Varnish targets the `NextUI_old` hook model and treats `NextUI_old/releases/NextUI-20260325-hooks-0-all.zip` as the TrimUI source of truth for launcher behavior.
+
+`boot.d` is not the `LD_PRELOAD` injection point. `NextUI_old` runs boot hooks through `run_hooks.sh`, and each hook runs in its own subshell. That means a boot hook can repair files and start the daemon, but it cannot export `LD_PRELOAD` back into the parent launcher shell before `nextui.elf` or Pak launches.
+
+For that reason Varnish patches `.tmp_update/<platform>.sh` instead:
+
+- The patched platform script calls `varnish --startup-env` just before it launches `MinUI.pak/launch.sh`.
+- `varnish --startup-env` re-applies the startup patch if the user is enabled, then prints shell code that exports `LD_PRELOAD` for the rest of that boot chain.
+- This reaches both the main NextUI process and later Pak launches, which is the part the old `nextui.elf` wrapper could not cover.
+
+The boot hook exists for repair and daemon health:
+
+- `~/.userdata/<platform>/.hooks/boot.d/varnish.sync.sh` runs synchronously.
+- It checks the enabled marker and startup patch.
+- If the user is enabled but the startup patch is missing, it re-applies the patch and forces a reboot so the next boot runs through the repaired launcher path.
+- If the user is enabled and the daemon is down, it starts `varnish --daemon`.
+
+Varnish intentionally does not patch the common `.tmp_update/updater` or NextUI `launch.sh`. The updater only selects a platform script, and the launcher is too late to make `LD_PRELOAD` survive card updates without broader patching.
 
 ---
 
@@ -185,4 +210,4 @@ make deploy
 
 Produces two artifacts per platform:
 - `varnish` — the daemon binary
-- `varnish_overlay.so` — the preload hook loaded into nextui.elf
+- `varnish_overlay.so` — the preload hook injected through the patched NextUI startup chain

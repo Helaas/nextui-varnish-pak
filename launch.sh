@@ -9,7 +9,11 @@ PAK_NAME=${PAK_NAME%.pak}
 cd "$PAK_DIR"
 
 # Ensure LD_LIBRARY_PATH includes system libs
-export LD_LIBRARY_PATH="/usr/trimui/lib:$PAK_DIR/lib:${LD_LIBRARY_PATH:-}"
+case "${PLATFORM:-}" in
+    my355) SYS_LIB="/usr/miyoo/lib" ;;
+    *) SYS_LIB="/usr/trimui/lib" ;;
+esac
+export LD_LIBRARY_PATH="$PAK_DIR/lib:$SYS_LIB:${LD_LIBRARY_PATH:-}"
 
 if [ -n "${SHARED_USERDATA_PATH:-}" ]; then
     SHARED_USERDATA_ROOT="$SHARED_USERDATA_PATH"

@@ -2,10 +2,10 @@
  * main.c — Varnish overlay service entry point.
  *
  * Usage:
- *   varnish              Install hooks + start daemon (default)
+ *   varnish              Enable startup wiring + start daemon (default)
  *   varnish --daemon     Start daemon (background)
- *   varnish --install    Install hooks only
- *   varnish --uninstall  Uninstall hooks, restore nextui.elf
+ *   varnish --install    Enable startup wiring + start daemon
+ *   varnish --uninstall  Disable startup wiring + stop daemon
  *   varnish --kill       Send SIGTERM to running daemon
  *   varnish --ui         Open the management UI
  */
@@ -22,51 +22,47 @@
 #include "ui.h"
 
 #include <limits.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-static int cmd_install(void) {
-    int err = 0;
+static void print_status_summary(const varnish_status *status) {
+    char summary[160];
 
-    if (hooks_install_preload() < 0) {
-        fprintf(stderr, "varnish: preload wrapper install failed\n");
-        err++;
-    }
-    if (hooks_install_boot() < 0) {
-        fprintf(stderr, "varnish: boot hook install failed\n");
-        err++;
+    if (!status) return;
+    control_format_status(status, summary, sizeof(summary));
+    fprintf(stderr, "%s\n", summary);
+}
+
+static int cmd_install(const char *self_path) {
+    varnish_status status;
+
+    if (control_enable(self_path, &status) != 0) {
+        fprintf(stderr, "varnish: could not fully enable startup wiring\n");
+        print_status_summary(&status);
+        return 1;
     }
 
-    if (!err)
-        fprintf(stderr, "varnish: hooks installed successfully\n");
-    return err ? 1 : 0;
+    fprintf(stderr, "varnish: enabled successfully\n");
+    print_status_summary(&status);
+    fprintf(stderr, "varnish: reboot required for LD_PRELOAD to affect the current launcher session\n");
+    return 0;
 }
 
 static int cmd_uninstall(void) {
-    int err = 0;
+    varnish_status status;
 
-    /* Kill daemon first if running */
-    if (ipc_daemon_running()) {
-        fprintf(stderr, "varnish: stopping daemon...\n");
-        ipc_kill_daemon();
-        /* Give it a moment to clean up */
-        usleep(500000);
+    if (control_disable(&status) != 0) {
+        fprintf(stderr, "varnish: could not fully disable startup wiring\n");
+        print_status_summary(&status);
+        return 1;
     }
 
-    if (hooks_uninstall_preload() < 0) {
-        fprintf(stderr, "varnish: preload wrapper uninstall failed\n");
-        err++;
-    }
-    if (hooks_uninstall_boot() < 0) {
-        fprintf(stderr, "varnish: boot hook uninstall failed\n");
-        err++;
-    }
-
-    if (!err)
-        fprintf(stderr, "varnish: hooks uninstalled successfully\n");
-    return err ? 1 : 0;
+    fprintf(stderr, "varnish: disabled successfully\n");
+    print_status_summary(&status);
+    fprintf(stderr, "varnish: reboot required to fully unload the current launcher session\n");
+    return 0;
 }
 
 static int cmd_kill(void) {
@@ -138,20 +134,23 @@ int main(int argc, char *argv[]) {
         if (strcmp(argv[1], "--daemon") == 0)
             return daemon_run();
         if (strcmp(argv[1], "--install") == 0)
-            return cmd_install();
+            return cmd_install(argv[0]);
         if (strcmp(argv[1], "--uninstall") == 0)
             return cmd_uninstall();
         if (strcmp(argv[1], "--kill") == 0)
             return cmd_kill();
         if (strcmp(argv[1], "--ui") == 0)
             return cmd_ui(argv[0]);
+        if (strcmp(argv[1], "--startup-env") == 0)
+            return hooks_write_startup_env(stdout) == 0 ? 0 : 1;
+        if (strcmp(argv[1], "--boot-hook") == 0)
+            return hooks_boot_check(argv[0]);
 
         fprintf(stderr,
                 "Usage: varnish [--daemon|--install|--uninstall|--kill|--ui]\n");
         return 1;
     }
 
-    /* Default: install hooks + start daemon */
-    cmd_install();
-    return daemon_run();
+    /* Default: enable startup wiring + start daemon */
+    return cmd_install(argv[0]);
 }

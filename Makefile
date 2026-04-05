@@ -11,6 +11,7 @@ APOSTROPHE_BRANCH := main
 BUILD_DIR := build
 DIST_DIR := $(BUILD_DIR)/release
 STAGING_DIR := $(BUILD_DIR)/staging
+NEXTUI_OLD_RELEASE ?= ../NextUI_old/releases/NextUI-20260325-hooks-0-all.zip
 SRC_FILES := $(shell find src -name '*.c' ! -name 'preload.c' -print | sort)
 
 TG5040_TOOLCHAIN := ghcr.io/loveretro/tg5040-toolchain:latest
@@ -20,7 +21,7 @@ ADB ?= adb
 
 COMMON_INCLUDES := -I$(APOSTROPHE_DIR)/include -Isrc
 
-.PHONY: all native mac run-mac tg5040 tg5050 my355 \
+.PHONY: all native mac run-mac tg5040 tg5050 my355 test-hooks \
 	package package-tg5040 package-tg5050 package-my355 do-package \
 	deploy deploy-platform clean help update-apostrophe
 
@@ -81,6 +82,9 @@ my355: $(APOSTROPHE_DIR)/include/apostrophe.h
 		-v "$(CURDIR)":/workspace \
 		$(MY355_TOOLCHAIN) \
 		make -C /workspace -f ports/my355/Makefile BUILD_DIR=/workspace/$(BUILD_DIR)/my355
+
+test-hooks:
+	sh tests/test_hooks.sh "$(NEXTUI_OLD_RELEASE)"
 
 # ── Packaging ───────────────────────────────────────────────
 
@@ -192,6 +196,7 @@ help:
 	@echo "  tg5040        Build for TG5040 (Docker cross-compile)"
 	@echo "  tg5050        Build for TG5050 (Docker cross-compile)"
 	@echo "  my355         Build for Miyoo Flip (Docker cross-compile)"
+	@echo "  test-hooks    Run host-side startup patch tests against a NextUI_old release zip"
 	@echo "  package       Package all platforms (.pak.zip + .pakz)"
 	@echo "  deploy        Detect adb platform, package, and push"
 	@echo "  update-apostrophe  Pin Apostrophe submodule to origin/main"
