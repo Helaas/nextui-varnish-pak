@@ -1,0 +1,11 @@
+# Build output
+/build/
+
+# macOS / Finder noise
+.DS_Store
+._*
+
+# Editor swap / backup files
+*.swp
+*.swo
+*~

@@ -6,6 +6,8 @@ SHELL := /bin/bash
 
 APP_NAME := varnish
 PAK_NAME := Varnish
+APOSTROPHE_DIR := third_party/apostrophe
+APOSTROPHE_BRANCH := main
 BUILD_DIR := build
 DIST_DIR := $(BUILD_DIR)/release
 STAGING_DIR := $(BUILD_DIR)/staging
@@ -16,11 +18,11 @@ TG5050_TOOLCHAIN := ghcr.io/loveretro/tg5050-toolchain:latest
 MY355_TOOLCHAIN  := ghcr.io/loveretro/my355-toolchain:latest
 ADB ?= adb
 
-COMMON_INCLUDES := -Isrc
+COMMON_INCLUDES := -I$(APOSTROPHE_DIR)/include -Isrc
 
 .PHONY: all native mac run-mac tg5040 tg5050 my355 \
 	package package-tg5040 package-tg5050 package-my355 do-package \
-	deploy deploy-platform clean help
+	deploy deploy-platform clean help update-apostrophe
 
 # ── Default target ──────────────────────────────────────────
 
@@ -28,9 +30,21 @@ native: mac
 run-native: run-mac
 all: tg5040 tg5050 my355
 
+# ── Submodule auto-init ────────────────────────────────────
+
+$(APOSTROPHE_DIR)/include/apostrophe.h:
+	git submodule update --init
+
+update-apostrophe: $(APOSTROPHE_DIR)/include/apostrophe.h
+	@set -euo pipefail; \
+	git -C "$(APOSTROPHE_DIR)" fetch origin "$(APOSTROPHE_BRANCH)"; \
+	commit=$$(git -C "$(APOSTROPHE_DIR)" rev-parse "origin/$(APOSTROPHE_BRANCH)"); \
+	git -C "$(APOSTROPHE_DIR)" checkout "$$commit" >/dev/null; \
+	echo "Apostrophe pinned to $$commit"
+
 # ── Native macOS build ──────────────────────────────────────
 
-mac:
+mac: $(APOSTROPHE_DIR)/include/apostrophe.h
 	@mkdir -p $(BUILD_DIR)/mac
 	cc -std=gnu11 -O0 -g \
 		-DPLATFORM_MAC \
@@ -40,27 +54,28 @@ mac:
 		$(SRC_FILES) \
 		$(shell pkg-config --libs sdl2 SDL2_ttf SDL2_image) \
 		-lm -lpthread
+	@cp $(APOSTROPHE_DIR)/res/font.ttf $(BUILD_DIR)/mac/font.ttf
 
 run-mac: mac
 	./$(BUILD_DIR)/mac/$(APP_NAME)
 
 # ── Docker cross-compilation ────────────────────────────────
 
-tg5040:
+tg5040: $(APOSTROPHE_DIR)/include/apostrophe.h
 	@mkdir -p $(BUILD_DIR)/tg5040
 	docker run --rm \
 		-v "$(CURDIR)":/workspace \
 		$(TG5040_TOOLCHAIN) \
 		make -C /workspace -f ports/tg5040/Makefile BUILD_DIR=/workspace/$(BUILD_DIR)/tg5040
 
-tg5050:
+tg5050: $(APOSTROPHE_DIR)/include/apostrophe.h
 	@mkdir -p $(BUILD_DIR)/tg5050
 	docker run --rm \
 		-v "$(CURDIR)":/workspace \
 		$(TG5050_TOOLCHAIN) \
 		make -C /workspace -f ports/tg5050/Makefile BUILD_DIR=/workspace/$(BUILD_DIR)/tg5050
 
-my355:
+my355: $(APOSTROPHE_DIR)/include/apostrophe.h
 	@mkdir -p $(BUILD_DIR)/my355
 	docker run --rm \
 		-v "$(CURDIR)":/workspace \
@@ -179,4 +194,5 @@ help:
 	@echo "  my355         Build for Miyoo Flip (Docker cross-compile)"
 	@echo "  package       Package all platforms (.pak.zip + .pakz)"
 	@echo "  deploy        Detect adb platform, package, and push"
+	@echo "  update-apostrophe  Pin Apostrophe submodule to origin/main"
 	@echo "  clean         Remove build artifacts"

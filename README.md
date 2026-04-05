@@ -123,14 +123,43 @@ echo "PILL mypak bottom-center 5 Hello" > /tmp/varnish.fifo 2>/dev/null || true
 
 ---
 
-## Installation
+## Managing Varnish
 
-Varnish installs itself when launched for the first time. It:
+Launching `Varnish.pak` now opens a small management UI instead of auto-installing and auto-starting the daemon.
 
-1. Writes a boot hook to `$USERDATA_PATH/.hooks/boot.d/varnish.sh` so the daemon starts at every boot
-2. Wraps `nextui.elf` so `varnish_overlay.so` is preloaded into NextUI's process
+The UI exposes a single `Enabled` toggle with live status:
 
-**Uninstall** via the `--uninstall` flag or by launching Varnish and selecting uninstall — this cleanly restores `nextui.elf` to its original state.
+- `Preload hook: Installed/Missing`
+- `Boot hook: Enabled/Disabled`
+- `Daemon: Running/Stopped`
+
+Saving `Enabled = On`:
+
+1. Installs the `nextui.elf` preload wrapper if needed
+2. Writes `$USERDATA_PATH/.hooks/boot.d/varnish.sh`
+3. Starts the daemon immediately if it is not already running
+
+Saving `Enabled = Off`:
+
+1. Removes the boot hook
+2. Stops the running daemon immediately
+3. Leaves the preload wrapper in place so re-enabling is fast
+
+`Disabled` is a soft disable, not a full uninstall.
+
+---
+
+## CLI modes
+
+| Command | Description |
+|---|---|
+| `varnish --ui` | Open the management UI |
+| `varnish --daemon` | Start the daemon directly |
+| `varnish --install` | Install preload + boot hooks without starting the UI |
+| `varnish --kill` | Stop the running daemon |
+| `varnish --uninstall` | Full uninstall: stop daemon, remove boot hook, and restore `nextui.elf` |
+
+Running `varnish` with no arguments still performs the original install + daemon start flow for direct CLI compatibility.
 
 ---
 

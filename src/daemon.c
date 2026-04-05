@@ -273,10 +273,6 @@ int daemon_run(void) {
 
     overlay_init(fb_width, fb_height);
 
-    /* Install hooks (non-fatal) */
-    hooks_install_preload();
-    hooks_install_boot();
-
     /* Start warmup timer */
     warmup_start();
 
