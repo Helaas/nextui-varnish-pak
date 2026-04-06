@@ -92,7 +92,7 @@ static pid_t render_tid = -1;
 static uint32_t last_present_frame_ids[VARNISH_MAX_SLOTS];
 static __thread int force_present_guard;
 
-/* ── Cached base-frame replay for idle overlay presents ────────── */
+/* ── Base-frame capture (conditional, only when overlays active) ── */
 
 static uint32_t *base_frame_pixels;
 static size_t    base_frame_capacity;
@@ -101,21 +101,11 @@ static void     *base_frame_renderer;
 static int       base_frame_w;
 static int       base_frame_h;
 static int       base_frame_valid;
-static uint64_t  base_frame_captured_at_ms;
 
 /* ── Init helpers ───────────────────────────────────────────────── */
 
 static pid_t current_tid(void) {
     return (pid_t)syscall(SYS_gettid);
-}
-
-static uint64_t monotonic_ms(void) {
-    struct timespec ts;
-
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-        return 0;
-
-    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
 static void init_sdl_funcs(void) {
@@ -339,58 +329,6 @@ static int draw_all_overlays(void *renderer) {
 
 /* ── Base-frame capture / replay ───────────────────────────────── */
 
-static void discard_base_frame_texture(void) {
-    if (base_frame_texture && pfn_DestroyTexture)
-        pfn_DestroyTexture(base_frame_texture);
-    base_frame_texture = NULL;
-    base_frame_renderer = NULL;
-    base_frame_w = 0;
-    base_frame_h = 0;
-    base_frame_valid = 0;
-    base_frame_captured_at_ms = 0;
-}
-
-static int ensure_base_frame_pixels(size_t pixel_count) {
-    uint32_t *pixels;
-
-    if (pixel_count == 0) return 0;
-    if (pixel_count <= base_frame_capacity) return 1;
-
-    pixels = (uint32_t *)realloc(base_frame_pixels, pixel_count * sizeof(uint32_t));
-    if (!pixels) return 0;
-
-    base_frame_pixels = pixels;
-    base_frame_capacity = pixel_count;
-    return 1;
-}
-
-static int ensure_base_frame_texture(void *renderer, int width, int height) {
-    if (!pfn_CreateTexture || !pfn_UpdateTexture || !renderer ||
-        width <= 0 || height <= 0)
-        return 0;
-
-    if (base_frame_texture &&
-        (base_frame_renderer != renderer ||
-         base_frame_w != width ||
-         base_frame_h != height)) {
-        discard_base_frame_texture();
-    }
-
-    if (!base_frame_texture) {
-        base_frame_texture = pfn_CreateTexture(
-            renderer, VR_SDL_PIXELFORMAT_ARGB8888,
-            VR_SDL_TEXTUREACCESS_STREAMING,
-            width, height);
-        if (!base_frame_texture)
-            return 0;
-        base_frame_renderer = renderer;
-        base_frame_w = width;
-        base_frame_h = height;
-    }
-
-    return 1;
-}
-
 static void capture_base_frame(void *renderer) {
     int width, height;
     size_t pixel_count;
@@ -403,10 +341,32 @@ static void capture_base_frame(void *renderer) {
         return;
 
     pixel_count = (size_t)width * (size_t)height;
-    if (!ensure_base_frame_pixels(pixel_count))
-        return;
-    if (!ensure_base_frame_texture(renderer, width, height))
-        return;
+
+    if (pixel_count > base_frame_capacity) {
+        uint32_t *pixels = (uint32_t *)realloc(base_frame_pixels,
+                                                pixel_count * sizeof(uint32_t));
+        if (!pixels) return;
+        base_frame_pixels = pixels;
+        base_frame_capacity = pixel_count;
+    }
+
+    if (base_frame_texture &&
+        (base_frame_renderer != renderer ||
+         base_frame_w != width || base_frame_h != height)) {
+        if (pfn_DestroyTexture) pfn_DestroyTexture(base_frame_texture);
+        base_frame_texture = NULL;
+    }
+
+    if (!base_frame_texture) {
+        if (!pfn_CreateTexture) return;
+        base_frame_texture = pfn_CreateTexture(
+            renderer, VR_SDL_PIXELFORMAT_ARGB8888,
+            VR_SDL_TEXTUREACCESS_STREAMING, width, height);
+        if (!base_frame_texture) return;
+        base_frame_renderer = renderer;
+        base_frame_w = width;
+        base_frame_h = height;
+    }
 
     if (pfn_RenderReadPixels(renderer, NULL, VR_SDL_PIXELFORMAT_ARGB8888,
                              base_frame_pixels,
@@ -418,7 +378,6 @@ static void capture_base_frame(void *renderer) {
         return;
 
     base_frame_valid = 1;
-    base_frame_captured_at_ms = monotonic_ms();
 }
 
 static int replay_base_frame(void *renderer) {
@@ -460,11 +419,20 @@ static void maybe_force_idle_present(void) {
 
     if (!need_present) return;
 
+    /*
+     * Replay the clean base frame (captured before overlays were drawn),
+     * then composite current overlays on top and present.  This prevents
+     * alpha accumulation from repeated idle presents and allows pills to
+     * disappear cleanly when they expire.
+     *
+     * If no base frame is available (pill appeared during idle without a
+     * prior capture), capture the current back buffer first — it should
+     * still hold the last presented frame on these devices.
+     */
     force_present_guard = 1;
-    if (!replay_base_frame(last_renderer)) {
-        force_present_guard = 0;
-        return;
-    }
+    if (!base_frame_valid)
+        capture_base_frame(last_renderer);
+    replay_base_frame(last_renderer);
     if (__builtin_expect(sdl_funcs_ok, 1))
         draw_all_overlays(last_renderer);
     real_present(last_renderer);
@@ -476,9 +444,8 @@ static void maybe_force_idle_present(void) {
 /* ── SDL_RenderPresent interposition ────────────────────────────── */
 
 void SDL_RenderPresent(void *renderer) {
-    int overlay_count = 0;
-    uint64_t now_ms;
-    int should_capture = 0;
+    int order[VARNISH_MAX_SLOTS];
+    int count;
 
     if (__builtin_expect(!real_present, 0)) {
         real_present = (fn_SDL_RenderPresent)dlsym(RTLD_NEXT, "SDL_RenderPresent");
@@ -489,20 +456,20 @@ void SDL_RenderPresent(void *renderer) {
     last_renderer = renderer;
     render_tid = current_tid();
 
-    overlay_count = collect_active_slots((int [VARNISH_MAX_SLOTS]){0});
-    now_ms = monotonic_ms();
-    should_capture = !base_frame_valid || overlay_count > 0;
-    if (!should_capture && now_ms > 0 &&
-        (!base_frame_captured_at_ms ||
-         now_ms - base_frame_captured_at_ms >= 250u)) {
-        should_capture = 1;
-    }
-    if (should_capture)
-        capture_base_frame(renderer);
+    if (__builtin_expect(sdl_funcs_ok, 1)) {
+        count = collect_active_slots(order);
 
-    /* Draw overlays INTO the renderer before presenting */
-    if (__builtin_expect(sdl_funcs_ok, 1))
-        draw_all_overlays(renderer);
+        if (count > 0) {
+            /* Capture the clean frame BEFORE drawing overlays.
+             * Only runs while pills are visible — zero cost otherwise. */
+            capture_base_frame(renderer);
+            for (int i = 0; i < count; i++)
+                draw_slot(renderer, order[i]);
+        } else {
+            /* No overlays — invalidate stale capture */
+            base_frame_valid = 0;
+        }
+    }
 
     real_present(renderer);
     for (int i = 0; i < VARNISH_MAX_SLOTS; i++)
