@@ -24,7 +24,6 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <time.h>
 
 #include "varnish_shm.h"
 
@@ -39,7 +38,6 @@
 typedef void  (*fn_SDL_RenderPresent)(void *);
 typedef void  (*fn_SDL_Delay)(uint32_t);
 typedef int   (*fn_SDL_PollEvent)(void *);
-typedef int   (*fn_SDL_GetRendererOutputSize)(void *, int *, int *);
 typedef void *(*fn_SDL_CreateTexture)(void *, uint32_t, int, int, int);
 typedef int   (*fn_SDL_UpdateTexture)(void *, const void *, const void *, int);
 typedef int   (*fn_SDL_SetTextureBlendMode)(void *, int);
@@ -50,7 +48,6 @@ typedef void  (*fn_SDL_DestroyTexture)(void *);
 static fn_SDL_RenderPresent       real_present;
 static fn_SDL_Delay               real_delay;
 static fn_SDL_PollEvent           real_poll_event;
-static fn_SDL_GetRendererOutputSize pfn_GetRendererOutputSize;
 static fn_SDL_CreateTexture       pfn_CreateTexture;
 static fn_SDL_UpdateTexture       pfn_UpdateTexture;
 static fn_SDL_SetTextureBlendMode pfn_SetBlendMode;
@@ -92,15 +89,16 @@ static pid_t render_tid = -1;
 static uint32_t last_present_frame_ids[VARNISH_MAX_SLOTS];
 static __thread int force_present_guard;
 
-/* ── Base-frame capture (conditional, only when overlays active) ── */
+/* ── Per-slot saved background (region behind each pill) ───────── */
 
-static uint32_t *base_frame_pixels;
-static size_t    base_frame_capacity;
-static void     *base_frame_texture;
-static void     *base_frame_renderer;
-static int       base_frame_w;
-static int       base_frame_h;
-static int       base_frame_valid;
+static uint32_t slot_save_pixels[VARNISH_MAX_SLOTS][VARNISH_SLOT_MAX_W * VARNISH_SLOT_MAX_H];
+static void    *slot_save_texture[VARNISH_MAX_SLOTS];
+static void    *slot_save_renderer[VARNISH_MAX_SLOTS];
+static int      slot_save_x[VARNISH_MAX_SLOTS];
+static int      slot_save_y[VARNISH_MAX_SLOTS];
+static int      slot_save_w[VARNISH_MAX_SLOTS];
+static int      slot_save_h[VARNISH_MAX_SLOTS];
+static int      slot_save_valid[VARNISH_MAX_SLOTS];
 
 /* ── Init helpers ───────────────────────────────────────────────── */
 
@@ -111,7 +109,6 @@ static pid_t current_tid(void) {
 static void init_sdl_funcs(void) {
     real_delay       = (fn_SDL_Delay)dlsym(RTLD_NEXT, "SDL_Delay");
     real_poll_event  = (fn_SDL_PollEvent)dlsym(RTLD_NEXT, "SDL_PollEvent");
-    pfn_GetRendererOutputSize = (fn_SDL_GetRendererOutputSize)dlsym(RTLD_NEXT, "SDL_GetRendererOutputSize");
     pfn_CreateTexture = (fn_SDL_CreateTexture)dlsym(RTLD_NEXT, "SDL_CreateTexture");
     pfn_UpdateTexture = (fn_SDL_UpdateTexture)dlsym(RTLD_NEXT, "SDL_UpdateTexture");
     pfn_SetBlendMode  = (fn_SDL_SetTextureBlendMode)dlsym(RTLD_NEXT, "SDL_SetTextureBlendMode");
@@ -327,67 +324,74 @@ static int draw_all_overlays(void *renderer) {
     return count;
 }
 
-/* ── Base-frame capture / replay ───────────────────────────────── */
+/* ── Per-slot background save / restore ────────────────────────── */
 
-static void capture_base_frame(void *renderer) {
-    int width, height;
-    size_t pixel_count;
+static void save_slot_background(void *renderer, int idx) {
+    typedef struct { int x, y, w, h; } SDL_Rect;
+    SDL_Rect rect;
 
-    if (!renderer || !pfn_GetRendererOutputSize || !pfn_RenderReadPixels)
+    if (!pfn_RenderReadPixels) return;
+
+    rect.x = slot_cached_x[idx];
+    rect.y = slot_cached_y[idx];
+    rect.w = slot_cached_w[idx];
+    rect.h = slot_cached_h[idx];
+
+    if (rect.w <= 0 || rect.h <= 0 ||
+        rect.w > VARNISH_SLOT_MAX_W || rect.h > VARNISH_SLOT_MAX_H)
         return;
 
-    if (pfn_GetRendererOutputSize(renderer, &width, &height) != 0 ||
-        width <= 0 || height <= 0)
+    if (pfn_RenderReadPixels(renderer, &rect, VR_SDL_PIXELFORMAT_ARGB8888,
+                              slot_save_pixels[idx],
+                              rect.w * (int)sizeof(uint32_t)) != 0)
         return;
 
-    pixel_count = (size_t)width * (size_t)height;
-
-    if (pixel_count > base_frame_capacity) {
-        uint32_t *pixels = (uint32_t *)realloc(base_frame_pixels,
-                                                pixel_count * sizeof(uint32_t));
-        if (!pixels) return;
-        base_frame_pixels = pixels;
-        base_frame_capacity = pixel_count;
+    /* Recreate save texture if renderer or dimensions changed */
+    if (slot_save_texture[idx] &&
+        (slot_save_renderer[idx] != renderer ||
+         slot_save_w[idx] != rect.w || slot_save_h[idx] != rect.h)) {
+        pfn_DestroyTexture(slot_save_texture[idx]);
+        slot_save_texture[idx] = NULL;
     }
 
-    if (base_frame_texture &&
-        (base_frame_renderer != renderer ||
-         base_frame_w != width || base_frame_h != height)) {
-        if (pfn_DestroyTexture) pfn_DestroyTexture(base_frame_texture);
-        base_frame_texture = NULL;
-    }
-
-    if (!base_frame_texture) {
+    if (!slot_save_texture[idx]) {
         if (!pfn_CreateTexture) return;
-        base_frame_texture = pfn_CreateTexture(
+        slot_save_texture[idx] = pfn_CreateTexture(
             renderer, VR_SDL_PIXELFORMAT_ARGB8888,
-            VR_SDL_TEXTUREACCESS_STREAMING, width, height);
-        if (!base_frame_texture) return;
-        base_frame_renderer = renderer;
-        base_frame_w = width;
-        base_frame_h = height;
+            VR_SDL_TEXTUREACCESS_STREAMING, rect.w, rect.h);
+        if (!slot_save_texture[idx]) return;
+        slot_save_renderer[idx] = renderer;
     }
 
-    if (pfn_RenderReadPixels(renderer, NULL, VR_SDL_PIXELFORMAT_ARGB8888,
-                             base_frame_pixels,
-                             width * (int)sizeof(uint32_t)) != 0)
-        return;
+    pfn_UpdateTexture(slot_save_texture[idx], NULL, slot_save_pixels[idx],
+                      rect.w * (int)sizeof(uint32_t));
 
-    if (pfn_UpdateTexture(base_frame_texture, NULL, base_frame_pixels,
-                          width * (int)sizeof(uint32_t)) != 0)
-        return;
-
-    base_frame_valid = 1;
+    slot_save_x[idx] = rect.x;
+    slot_save_y[idx] = rect.y;
+    slot_save_w[idx] = rect.w;
+    slot_save_h[idx] = rect.h;
+    slot_save_valid[idx] = 1;
 }
 
-static int replay_base_frame(void *renderer) {
-    if (!base_frame_valid || !renderer || !pfn_RenderCopy)
-        return 0;
-    if (!base_frame_texture || base_frame_renderer != renderer)
-        return 0;
+static void restore_slot_background(void *renderer, int idx) {
+    typedef struct { int x, y, w, h; } SDL_Rect;
+    SDL_Rect dst;
 
-    pfn_RenderCopy(renderer, base_frame_texture, NULL, NULL);
-    return 1;
+    if (!slot_save_valid[idx] || !slot_save_texture[idx] || !pfn_RenderCopy)
+        return;
+    if (slot_save_renderer[idx] != renderer)
+        return;
+
+    dst.x = slot_save_x[idx];
+    dst.y = slot_save_y[idx];
+    dst.w = slot_save_w[idx];
+    dst.h = slot_save_h[idx];
+    pfn_RenderCopy(renderer, slot_save_texture[idx], NULL, &dst);
+}
+
+static void restore_all_backgrounds(void *renderer) {
+    for (int i = 0; i < VARNISH_MAX_SLOTS; i++)
+        restore_slot_background(renderer, i);
 }
 
 /* ── Idle-present forcing ──────────────────────────────────────── */
@@ -420,21 +424,23 @@ static void maybe_force_idle_present(void) {
     if (!need_present) return;
 
     /*
-     * Replay the clean base frame (captured before overlays were drawn),
-     * then composite current overlays on top and present.  This prevents
-     * alpha accumulation from repeated idle presents and allows pills to
-     * disappear cleanly when they expire.
-     *
-     * If no base frame is available (pill appeared during idle without a
-     * prior capture), capture the current back buffer first — it should
-     * still hold the last presented frame on these devices.
+     * Restore saved backgrounds to erase previously-drawn pills, then
+     * composite current overlays fresh.  For newly-active slots that
+     * appeared during idle (no prior save), capture their background
+     * from the current back buffer before drawing.
      */
     force_present_guard = 1;
-    if (!base_frame_valid)
-        capture_base_frame(last_renderer);
-    replay_base_frame(last_renderer);
-    if (__builtin_expect(sdl_funcs_ok, 1))
-        draw_all_overlays(last_renderer);
+    restore_all_backgrounds(last_renderer);
+    if (__builtin_expect(sdl_funcs_ok, 1)) {
+        int order[VARNISH_MAX_SLOTS];
+        int count = collect_active_slots(order);
+        for (i = 0; i < count; i++) {
+            if (!slot_save_valid[order[i]])
+                save_slot_background(last_renderer, order[i]);
+        }
+        for (i = 0; i < count; i++)
+            draw_slot(last_renderer, order[i]);
+    }
     real_present(last_renderer);
     for (i = 0; i < VARNISH_MAX_SLOTS; i++)
         last_present_frame_ids[i] = slot_cached_frame_id[i];
@@ -460,14 +466,16 @@ void SDL_RenderPresent(void *renderer) {
         count = collect_active_slots(order);
 
         if (count > 0) {
-            /* Capture the clean frame BEFORE drawing overlays.
-             * Only runs while pills are visible — zero cost otherwise. */
-            capture_base_frame(renderer);
+            /* Save the clean region behind each pill BEFORE drawing.
+             * Per-slot region readback: ~72KB per pill vs 3MB full frame. */
+            for (int i = 0; i < count; i++)
+                save_slot_background(renderer, order[i]);
             for (int i = 0; i < count; i++)
                 draw_slot(renderer, order[i]);
         } else {
-            /* No overlays — invalidate stale capture */
-            base_frame_valid = 0;
+            /* No overlays — invalidate all stale saves */
+            for (int i = 0; i < VARNISH_MAX_SLOTS; i++)
+                slot_save_valid[i] = 0;
         }
     }
 
