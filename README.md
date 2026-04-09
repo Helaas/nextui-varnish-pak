@@ -127,11 +127,28 @@ echo "PILL mypak bottom-center 5 Hello" > /tmp/varnish.fifo 2>/dev/null || true
 
 Launching `Varnish.pak` now opens a small management UI instead of auto-installing and auto-starting the daemon.
 
-The UI exposes a single `Enabled` toggle with live status:
+The main screen exposes:
+
+- `Enabled` — install/remove the startup wiring and start/stop the daemon
+- `Hotkeys` — configure global button chords handled by the daemon
+
+The live status still shows:
 
 - `Startup patch: Installed/Missing`
 - `Boot hook: Installed/Missing`
 - `Daemon: Running/Stopped`
+
+Hotkeys are stored at:
+
+```
+~/.userdata/<platform>/Varnish/keybinds.txt
+```
+
+Current v1 action:
+
+- `Screenshot` — capture the current framebuffer to `/mnt/SDCARD/Screenshots`
+
+Hotkeys are active only while Varnish is enabled and its daemon is running. The settings UI pauses hotkeys while it is open so editing a binding does not accidentally trigger it.
 
 Saving `Enabled = On`:
 

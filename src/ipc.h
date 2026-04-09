@@ -14,6 +14,9 @@ typedef enum {
     IPC_CMD_HIDE,       /* HIDE <client_id> */
     IPC_CMD_CLEAR,      /* CLEAR */
     IPC_CMD_QUIT,       /* QUIT */
+    IPC_CMD_HOTKEYS_RELOAD,
+    IPC_CMD_HOTKEYS_PAUSE,
+    IPC_CMD_HOTKEYS_RESUME,
 } ipc_cmd_type_t;
 
 typedef struct {
@@ -30,5 +33,8 @@ void ipc_cleanup(void);
 void ipc_write_pid(void);
 int  ipc_daemon_running(void);
 int  ipc_kill_daemon(void);
+int  ipc_hotkeys_reload(void);
+int  ipc_hotkeys_pause(void);
+int  ipc_hotkeys_resume(void);
 
 #endif /* VARNISH_IPC_H */

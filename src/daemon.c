@@ -7,8 +7,10 @@
 
 #include "daemon.h"
 #include "device.h"
+#include "hotkeys.h"
 #include "ipc.h"
 #include "overlay.h"
+#include "screenshot.h"
 #include "shm.h"
 #include "strutil.h"
 #include "varnish_shm.h"
@@ -200,6 +202,37 @@ static void handle_hide(const ipc_cmd_t *cmd) {
     }
 }
 
+static void show_internal_pill(const char *text, int duration_secs) {
+    ipc_cmd_t cmd = {0};
+
+    cmd.type = IPC_CMD_PILL;
+    str_copy_trunc(cmd.client_id, sizeof(cmd.client_id), "varnish");
+    str_copy_trunc(cmd.position, sizeof(cmd.position), "bottom-center");
+    str_copy_trunc(cmd.text, sizeof(cmd.text), text);
+    cmd.duration_secs = duration_secs;
+    handle_pill(&cmd);
+}
+
+static void handle_hotkey_action(varnish_hotkey_action action) {
+    char out_path[512];
+    const char *filename;
+    char message[320];
+
+    if (action != VARNISH_HOTKEY_ACTION_SCREENSHOT)
+        return;
+
+    if (screenshot_capture(out_path, sizeof(out_path)) != 0) {
+        show_internal_pill("Screenshot failed", 3);
+        return;
+    }
+
+    filename = strrchr(out_path, '/');
+    filename = filename ? (filename + 1) : out_path;
+    str_copy_trunc(message, sizeof(message), "Saved ");
+    (void)str_append(message, sizeof(message), filename);
+    show_internal_pill(message, 3);
+}
+
 /* ── Signal handler ────────────────────────────────────────────── */
 
 static void signal_handler(int sig) {
@@ -300,6 +333,7 @@ int daemon_run(void) {
     }
 
     overlay_init(fb_width, fb_height);
+    hotkeys_runtime_init();
 
     /* Start warmup timer */
     warmup_start();
@@ -328,6 +362,15 @@ int daemon_run(void) {
             case IPC_CMD_QUIT:
                 quit_flag = 1;
                 break;
+            case IPC_CMD_HOTKEYS_RELOAD:
+                (void)hotkeys_runtime_reload();
+                break;
+            case IPC_CMD_HOTKEYS_PAUSE:
+                hotkeys_runtime_set_paused(true);
+                break;
+            case IPC_CMD_HOTKEYS_RESUME:
+                hotkeys_runtime_set_paused(false);
+                break;
             default:
                 break;
             }
@@ -336,6 +379,7 @@ int daemon_run(void) {
         /* Expire timed-out slots */
         warmup_update();
         slot_expire_tick();
+        handle_hotkey_action(hotkeys_runtime_poll());
 
         /* ~50ms tick (20 Hz) */
         usleep(50000);
@@ -345,6 +389,7 @@ int daemon_run(void) {
 
     fprintf(stderr, "varnish: daemon shutting down\n");
     slot_clear_all();
+    hotkeys_runtime_cleanup();
     overlay_cleanup();
     shm_cleanup();
     ipc_cleanup();

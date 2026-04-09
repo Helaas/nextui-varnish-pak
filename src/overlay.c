@@ -82,7 +82,8 @@ static const char *nextui_settings_path(char *buf, size_t buf_size) {
     char shared[256];
     device_get_shared_userdata_path(shared, sizeof(shared));
     if (!shared[0]) return NULL;
-    snprintf(buf, buf_size, "%s/minuisettings.txt", shared);
+    if (path_join(buf, buf_size, shared, "minuisettings.txt") != 0)
+        return NULL;
     return buf;
 #else
     const char *path = getenv("AP_MINUI_SETTINGS_PATH");

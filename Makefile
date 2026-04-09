@@ -21,7 +21,7 @@ ADB ?= adb
 
 COMMON_INCLUDES := -I$(APOSTROPHE_DIR)/include -Isrc
 
-.PHONY: all native mac run-mac tg5040 tg5050 my355 test-hooks \
+.PHONY: all native mac run-mac tg5040 tg5050 my355 test-hooks test-hotkeys \
 	package package-tg5040 package-tg5050 package-my355 do-package \
 	deploy deploy-platform clean help update-apostrophe
 
@@ -85,6 +85,9 @@ my355: $(APOSTROPHE_DIR)/include/apostrophe.h
 
 test-hooks:
 	sh tests/test_hooks.sh "$(NEXTUI_OLD_RELEASE)"
+
+test-hotkeys:
+	sh tests/test_hotkeys.sh
 
 # ── Packaging ───────────────────────────────────────────────
 
@@ -197,6 +200,7 @@ help:
 	@echo "  tg5050        Build for TG5050 (Docker cross-compile)"
 	@echo "  my355         Build for Miyoo Flip (Docker cross-compile)"
 	@echo "  test-hooks    Run host-side startup patch tests against a NextUI_old release zip"
+	@echo "  test-hotkeys  Run host-side hotkey and screenshot-path tests"
 	@echo "  package       Package all platforms (.pak.zip + .pakz)"
 	@echo "  deploy        Detect adb platform, package, and push"
 	@echo "  update-apostrophe  Pin Apostrophe submodule to origin/main"

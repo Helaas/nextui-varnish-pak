@@ -8,6 +8,9 @@
  *   HIDE <client_id>
  *   CLEAR
  *   QUIT
+ *   HOTKEYS_RELOAD
+ *   HOTKEYS_PAUSE
+ *   HOTKEYS_RESUME
  */
 
 #include "ipc.h"
@@ -27,6 +30,24 @@ static int fifo_fd = -1;
 /* Partial line buffer for handling reads that split across calls */
 static char line_buf[1024];
 static int  line_buf_len;
+
+static int ipc_send_line(const char *line) {
+    int fd;
+    size_t len;
+    ssize_t wrote;
+
+    if (!line || !line[0])
+        return -1;
+
+    fd = open(VARNISH_FIFO_PATH, O_WRONLY | O_NONBLOCK);
+    if (fd < 0)
+        return -1;
+
+    len = strlen(line);
+    wrote = write(fd, line, len);
+    close(fd);
+    return wrote == (ssize_t)len ? 0 : -1;
+}
 
 /* ── Daemon side ───────────────────────────────────────────────── */
 
@@ -64,6 +85,21 @@ static int parse_line(const char *line, ipc_cmd_t *cmd) {
 
     if (strcmp(line, "CLEAR") == 0) {
         cmd->type = IPC_CMD_CLEAR;
+        return 1;
+    }
+
+    if (strcmp(line, "HOTKEYS_RELOAD") == 0) {
+        cmd->type = IPC_CMD_HOTKEYS_RELOAD;
+        return 1;
+    }
+
+    if (strcmp(line, "HOTKEYS_PAUSE") == 0) {
+        cmd->type = IPC_CMD_HOTKEYS_PAUSE;
+        return 1;
+    }
+
+    if (strcmp(line, "HOTKEYS_RESUME") == 0) {
+        cmd->type = IPC_CMD_HOTKEYS_RESUME;
         return 1;
     }
 
@@ -178,6 +214,18 @@ int ipc_kill_daemon(void) {
     fclose(f);
     if (pid <= 0) return -1;
     return kill((pid_t)pid, SIGTERM);
+}
+
+int ipc_hotkeys_reload(void) {
+    return ipc_send_line("HOTKEYS_RELOAD\n");
+}
+
+int ipc_hotkeys_pause(void) {
+    return ipc_send_line("HOTKEYS_PAUSE\n");
+}
+
+int ipc_hotkeys_resume(void) {
+    return ipc_send_line("HOTKEYS_RESUME\n");
 }
 
 void ipc_cleanup(void) {
