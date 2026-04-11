@@ -17,6 +17,7 @@
 #include <string.h>
 
 #ifdef __linux__
+#include <sys/wait.h>
 #include <unistd.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
@@ -241,7 +242,11 @@ static int load_theme_from_device_nextval(void) {
         total += n;
     }
     json[total] = '\0';
-    pclose(fp);
+    {
+        int status = pclose(fp);
+        if (status < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            fprintf(stderr, "varnish: nextval.elf exited with error (status=%d)\n", status);
+    }
 
     if (total == 0) return -1;
     return load_theme_from_json(json);

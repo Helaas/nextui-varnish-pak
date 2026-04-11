@@ -47,7 +47,7 @@ update-apostrophe: $(APOSTROPHE_DIR)/include/apostrophe.h
 
 mac: $(APOSTROPHE_DIR)/include/apostrophe.h
 	@mkdir -p $(BUILD_DIR)/mac
-	cc -std=gnu11 -O0 -g \
+	cc -std=gnu11 -O0 -g -Wall -Wextra -Wno-unused-parameter \
 		-DPLATFORM_MAC \
 		$(COMMON_INCLUDES) \
 		$(shell pkg-config --cflags sdl2 SDL2_ttf SDL2_image) \

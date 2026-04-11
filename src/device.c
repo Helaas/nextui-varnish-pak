@@ -18,6 +18,15 @@
 
 #define MAX_PATH 512
 
+/* ── Device framebuffer dimensions ────────��───────────────────── */
+
+#define DEVICE_FB_BRICK_W        1024    /* TrimUI Brick */
+#define DEVICE_FB_BRICK_H         768
+#define DEVICE_SCALE_BRICK          3
+#define DEVICE_SCALE_DEFAULT        2
+#define DEVICE_PADDING_BRICK        5
+#define DEVICE_PADDING_DEFAULT     10
+
 /* ── Path helpers ──────────────────────────────────────────────── */
 
 void device_get_sdcard_path(char *out, size_t size) {
@@ -189,24 +198,21 @@ int device_get_fb_dimensions(int *out_w, int *out_h) {
     return 0;
 #else
     /* macOS fallback for development */
-    if (out_w) *out_w = 1024;
-    if (out_h) *out_h = 768;
+    if (out_w) *out_w = DEVICE_FB_BRICK_W;
+    if (out_h) *out_h = DEVICE_FB_BRICK_H;
     return 0;
 #endif
 }
 
 int device_get_scale(int fb_width, int fb_height) {
-    if (fb_width == 1024 && fb_height == 768) {
-        /* TrimUI Brick */
-        return 3;
-    }
+    if (fb_width == DEVICE_FB_BRICK_W && fb_height == DEVICE_FB_BRICK_H)
+        return DEVICE_SCALE_BRICK;
     /* Smart Pro 1280x720, Miyoo Flip 640x480 */
-    return 2;
+    return DEVICE_SCALE_DEFAULT;
 }
 
 int device_get_padding(int fb_width, int fb_height) {
-    if (fb_width == 1024 && fb_height == 768) {
-        return 5;
-    }
-    return 10;
+    if (fb_width == DEVICE_FB_BRICK_W && fb_height == DEVICE_FB_BRICK_H)
+        return DEVICE_PADDING_BRICK;
+    return DEVICE_PADDING_DEFAULT;
 }

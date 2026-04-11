@@ -60,18 +60,27 @@ void control_format_status(const varnish_status *status, char *out, size_t size)
 int control_enable(const char *self_path, varnish_status *out_status) {
     int err = 0;
 
-    if (hooks_set_enabled(true) < 0)
+    if (hooks_set_enabled(true) < 0) {
+        fprintf(stderr, "varnish: control: failed to set enabled marker\n");
         err++;
-    if (hooks_install_startup() < 0)
+    }
+    if (hooks_install_startup() < 0) {
+        fprintf(stderr, "varnish: control: failed to install startup patch\n");
         err++;
-    if (hooks_install_boot() < 0)
+    }
+    if (hooks_install_boot() < 0) {
+        fprintf(stderr, "varnish: control: failed to install boot hook\n");
         err++;
+    }
 
     if (!ipc_daemon_running()) {
-        if (daemon_spawn_background(self_path) < 0)
+        if (daemon_spawn_background(self_path) < 0) {
+            fprintf(stderr, "varnish: control: failed to spawn daemon\n");
             err++;
-        else if (!wait_for_daemon_state(true, CONTROL_START_TIMEOUT_MS))
+        } else if (!wait_for_daemon_state(true, CONTROL_START_TIMEOUT_MS)) {
+            fprintf(stderr, "varnish: control: daemon did not start within timeout\n");
             err++;
+        }
     }
 
     control_get_status(out_status);
@@ -93,18 +102,27 @@ int control_enable(const char *self_path, varnish_status *out_status) {
 int control_disable(varnish_status *out_status) {
     int err = 0;
 
-    if (hooks_set_enabled(false) < 0)
+    if (hooks_set_enabled(false) < 0) {
+        fprintf(stderr, "varnish: control: failed to clear enabled marker\n");
         err++;
-    if (hooks_uninstall_startup() < 0)
+    }
+    if (hooks_uninstall_startup() < 0) {
+        fprintf(stderr, "varnish: control: failed to uninstall startup patch\n");
         err++;
-    if (hooks_uninstall_boot() < 0)
+    }
+    if (hooks_uninstall_boot() < 0) {
+        fprintf(stderr, "varnish: control: failed to uninstall boot hook\n");
         err++;
+    }
 
     if (ipc_daemon_running()) {
-        if (ipc_kill_daemon() < 0)
+        if (ipc_kill_daemon() < 0) {
+            fprintf(stderr, "varnish: control: failed to kill daemon\n");
             err++;
-        else if (!wait_for_daemon_state(false, CONTROL_STOP_TIMEOUT_MS))
+        } else if (!wait_for_daemon_state(false, CONTROL_STOP_TIMEOUT_MS)) {
+            fprintf(stderr, "varnish: control: daemon did not stop within timeout\n");
             err++;
+        }
     }
 
     control_get_status(out_status);

@@ -69,6 +69,9 @@ int ipc_init(void) {
     int wr = open(VARNISH_FIFO_PATH, O_WRONLY | O_NONBLOCK);
     if (wr < 0) {
         perror("varnish: open fifo (wr-keepalive)");
+        close(fifo_fd);
+        fifo_fd = -1;
+        return -1;
     }
 
     line_buf_len = 0;
@@ -189,9 +192,14 @@ int ipc_read(ipc_cmd_t *cmd) {
 
 void ipc_write_pid(void) {
     FILE *f = fopen(VARNISH_PID_PATH, "w");
-    if (!f) return;
-    fprintf(f, "%d\n", (int)getpid());
-    fclose(f);
+    if (!f) {
+        perror("varnish: cannot create PID file");
+        return;
+    }
+    if (fprintf(f, "%d\n", (int)getpid()) < 0)
+        perror("varnish: cannot write PID file");
+    if (fclose(f) != 0)
+        perror("varnish: cannot close PID file");
 }
 
 int ipc_daemon_running(void) {

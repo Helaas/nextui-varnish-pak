@@ -641,11 +641,13 @@ static varnish_hotkey_button hotkeys_my355_button_from_key(int code) {
 
 static uint32_t hotkeys_my355_pressed_mask(void) {
     struct input_event ev;
+    ssize_t n;
 
     if (g_hotkeys.raw_input_fd < 0)
         return 0u;
 
-    while (read(g_hotkeys.raw_input_fd, &ev, sizeof(ev)) == sizeof(ev)) {
+    errno = 0;
+    while ((n = read(g_hotkeys.raw_input_fd, &ev, sizeof(ev))) == (ssize_t)sizeof(ev)) {
         varnish_hotkey_button button;
         uint32_t bit;
 
@@ -663,7 +665,7 @@ static uint32_t hotkeys_my355_pressed_mask(void) {
             g_hotkeys.raw_pressed_mask &= ~bit;
     }
 
-    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         close(g_hotkeys.raw_input_fd);
         g_hotkeys.raw_input_fd = -1;
         g_hotkeys.raw_pressed_mask = 0u;

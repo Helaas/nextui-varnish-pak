@@ -281,6 +281,8 @@ static int strip_startup_block(const char *content, char **out_buf) {
 static int insert_startup_block(const char *content, char **out_buf) {
     const char *anchor;
     size_t prefix_len;
+    size_t block_len;
+    size_t anchor_len;
     size_t len;
     char *buf;
 
@@ -294,13 +296,15 @@ static int insert_startup_block(const char *content, char **out_buf) {
     if (!anchor) return -1;
 
     prefix_len = (size_t)(anchor - content);
-    len = strlen(content) + strlen(startup_block);
+    block_len = strlen(startup_block);
+    anchor_len = strlen(content) - prefix_len;
+    len = prefix_len + block_len + anchor_len;
     buf = (char *)malloc(len + 1);
     if (!buf) return -1;
 
     memcpy(buf, content, prefix_len);
-    memcpy(buf + prefix_len, startup_block, strlen(startup_block));
-    strcpy(buf + prefix_len + strlen(startup_block), anchor);
+    memcpy(buf + prefix_len, startup_block, block_len);
+    memcpy(buf + prefix_len + block_len, anchor, anchor_len + 1);
     *out_buf = buf;
     return 1;
 }
