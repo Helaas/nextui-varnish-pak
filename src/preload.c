@@ -35,6 +35,14 @@
 #define VR_SDL_TEXTUREACCESS_STREAMING  1
 #define VR_SDL_BLENDMODE_NONE           0
 #define VR_SDL_BLENDMODE_BLEND          1
+#define VR_MAX_DIRTY_RENDERERS          4
+#define VR_SLOT_SAVE_PAD                2
+#define VR_SLOT_CLEANUP_FRAMES          3
+#define VR_SLOT_RESTORE_TOLERANCE       8
+
+typedef struct {
+    int x, y, w, h;
+} vr_sdl_rect_t;
 
 /* ── Minimal GL declarations (resolved at runtime) ─────────────── */
 
@@ -92,7 +100,11 @@ typedef int   (*fn_SDL_PollEvent)(void *);
 typedef void *(*fn_SDL_CreateTexture)(void *, uint32_t, int, int, int);
 typedef int   (*fn_SDL_UpdateTexture)(void *, const void *, const void *, int);
 typedef int   (*fn_SDL_SetTextureBlendMode)(void *, int);
+typedef int   (*fn_SDL_RenderClear)(void *);
 typedef int   (*fn_SDL_RenderCopy)(void *, void *, const void *, const void *);
+typedef int   (*fn_SDL_RenderCopyEx)(void *, void *, const void *, const void *, double, const void *, int);
+typedef int   (*fn_SDL_RenderFillRect)(void *, const void *);
+typedef int   (*fn_SDL_RenderFillRects)(void *, const void *, int);
 typedef int   (*fn_SDL_RenderReadPixels)(void *, const void *, uint32_t, void *, int);
 typedef void  (*fn_SDL_DestroyTexture)(void *);
 typedef void *(*fn_SDL_GL_GetProcAddress)(const char *);
@@ -145,7 +157,11 @@ static fn_SDL_PollEvent           real_poll_event;
 static fn_SDL_CreateTexture       pfn_CreateTexture;
 static fn_SDL_UpdateTexture       pfn_UpdateTexture;
 static fn_SDL_SetTextureBlendMode pfn_SetBlendMode;
+static fn_SDL_RenderClear         pfn_RenderClear;
 static fn_SDL_RenderCopy          pfn_RenderCopy;
+static fn_SDL_RenderCopyEx        pfn_RenderCopyEx;
+static fn_SDL_RenderFillRect      pfn_RenderFillRect;
+static fn_SDL_RenderFillRects     pfn_RenderFillRects;
 static fn_SDL_RenderReadPixels    pfn_RenderReadPixels;
 static fn_SDL_DestroyTexture      pfn_DestroyTexture;
 static fn_SDL_GL_GetProcAddress   pfn_SDL_GL_GetProcAddress;
@@ -218,6 +234,9 @@ static void    *slot_tex_renderer[VARNISH_MAX_SLOTS];
 static int      slot_tex_w[VARNISH_MAX_SLOTS];
 static int      slot_tex_h[VARNISH_MAX_SLOTS];
 static uint32_t slot_texture_frame_id[VARNISH_MAX_SLOTS];
+static uint32_t slot_texture_save_serial[VARNISH_MAX_SLOTS];
+static uint32_t slot_last_composited[VARNISH_MAX_SLOTS][VARNISH_SLOT_MAX_W * VARNISH_SLOT_MAX_H];
+static int      slot_last_composited_valid[VARNISH_MAX_SLOTS];
 
 static GLuint   gl_slot_texture[VARNISH_MAX_SLOTS];
 static int      gl_slot_tex_w[VARNISH_MAX_SLOTS];
@@ -233,6 +252,21 @@ static GLint    gl_attr_position = -1;
 static GLint    gl_attr_texcoord = -1;
 static GLint    gl_uniform_texture = -1;
 static int      gl_program_ready;
+
+typedef struct {
+    void *renderer;
+    int dirty;
+    int full;
+    int x, y, w, h;
+} sdl_dirty_state_t;
+
+typedef struct {
+    int dirty;
+    int full;
+    int x, y, w, h;
+} sdl_dirty_snapshot_t;
+
+static sdl_dirty_state_t renderer_dirty_state[VR_MAX_DIRTY_RENDERERS];
 
 /* ── Idle-present tracking ─────────────────────────────────────── */
 
@@ -251,9 +285,22 @@ static int      slot_save_y[VARNISH_MAX_SLOTS];
 static int      slot_save_w[VARNISH_MAX_SLOTS];
 static int      slot_save_h[VARNISH_MAX_SLOTS];
 static int      slot_save_valid[VARNISH_MAX_SLOTS];
+static uint32_t slot_save_serial[VARNISH_MAX_SLOTS];
+static uint32_t slot_cleanup_pixels[VARNISH_MAX_SLOTS][VARNISH_SLOT_MAX_W * VARNISH_SLOT_MAX_H];
+static uint32_t slot_cleanup_composited[VARNISH_MAX_SLOTS][VARNISH_SLOT_MAX_W * VARNISH_SLOT_MAX_H];
+static void    *slot_cleanup_texture[VARNISH_MAX_SLOTS];
+static void    *slot_cleanup_renderer[VARNISH_MAX_SLOTS];
+static int      slot_cleanup_x[VARNISH_MAX_SLOTS];
+static int      slot_cleanup_y[VARNISH_MAX_SLOTS];
+static int      slot_cleanup_w[VARNISH_MAX_SLOTS];
+static int      slot_cleanup_h[VARNISH_MAX_SLOTS];
+static int      slot_cleanup_valid[VARNISH_MAX_SLOTS];
+static int      slot_cleanup_frames[VARNISH_MAX_SLOTS];
+static int      slot_cleanup_composited_valid[VARNISH_MAX_SLOTS];
 
 /* Software compositing buffer — reused per-slot (single render thread) */
 static uint32_t slot_composited[VARNISH_SLOT_MAX_W * VARNISH_SLOT_MAX_H];
+static uint32_t slot_readback[VARNISH_SLOT_MAX_W * VARNISH_SLOT_MAX_H];
 
 /* ── Init helpers ───────────────────────────────────────────────── */
 
@@ -279,7 +326,11 @@ static void init_sdl_funcs(void) {
     pfn_CreateTexture = (fn_SDL_CreateTexture)resolve_symbol_any("SDL_CreateTexture");
     pfn_UpdateTexture = (fn_SDL_UpdateTexture)resolve_symbol_any("SDL_UpdateTexture");
     pfn_SetBlendMode  = (fn_SDL_SetTextureBlendMode)resolve_symbol_any("SDL_SetTextureBlendMode");
+    pfn_RenderClear   = (fn_SDL_RenderClear)resolve_symbol_any("SDL_RenderClear");
     pfn_RenderCopy    = (fn_SDL_RenderCopy)resolve_symbol_any("SDL_RenderCopy");
+    pfn_RenderCopyEx  = (fn_SDL_RenderCopyEx)resolve_symbol_any("SDL_RenderCopyEx");
+    pfn_RenderFillRect = (fn_SDL_RenderFillRect)resolve_symbol_any("SDL_RenderFillRect");
+    pfn_RenderFillRects = (fn_SDL_RenderFillRects)resolve_symbol_any("SDL_RenderFillRects");
     pfn_RenderReadPixels = (fn_SDL_RenderReadPixels)resolve_symbol_any("SDL_RenderReadPixels");
     pfn_DestroyTexture = (fn_SDL_DestroyTexture)resolve_symbol_any("SDL_DestroyTexture");
     pfn_SDL_GL_GetProcAddress =
@@ -407,11 +458,515 @@ static void init_shm(void) {
     for (int i = 0; i < VARNISH_MAX_SLOTS; i++) {
         slot_cached_frame_id[i] = UINT32_MAX;
         slot_texture_frame_id[i] = UINT32_MAX;
+        slot_texture_save_serial[i] = UINT32_MAX;
         last_present_frame_ids[i] = UINT32_MAX;
+        slot_save_serial[i] = 0;
+        slot_save_valid[i] = 0;
+        slot_cleanup_valid[i] = 0;
+        slot_cleanup_frames[i] = 0;
+        slot_cleanup_composited_valid[i] = 0;
+        slot_last_composited_valid[i] = 0;
     }
     gl_reset_resources();
 
     shm_ok = 1;
+}
+
+static sdl_dirty_state_t *dirty_state_for_renderer(void *renderer, int create) {
+    sdl_dirty_state_t *free_state = NULL;
+
+    if (!renderer)
+        return NULL;
+
+    for (int i = 0; i < VR_MAX_DIRTY_RENDERERS; i++) {
+        if (renderer_dirty_state[i].renderer == renderer)
+            return &renderer_dirty_state[i];
+        if (!renderer_dirty_state[i].renderer && !free_state)
+            free_state = &renderer_dirty_state[i];
+    }
+
+    if (!create || !free_state)
+        return NULL;
+
+    memset(free_state, 0, sizeof(*free_state));
+    free_state->renderer = renderer;
+    return free_state;
+}
+
+static void mark_renderer_dirty_full(void *renderer) {
+    sdl_dirty_state_t *state = dirty_state_for_renderer(renderer, 1);
+
+    if (!state)
+        return;
+
+    state->dirty = 1;
+    state->full = 1;
+    state->x = 0;
+    state->y = 0;
+    state->w = 0;
+    state->h = 0;
+}
+
+static void mark_renderer_dirty_rect(void *renderer, const vr_sdl_rect_t *rect) {
+    sdl_dirty_state_t *state = dirty_state_for_renderer(renderer, 1);
+    int x2, y2;
+
+    if (!state)
+        return;
+
+    if (!rect || rect->w <= 0 || rect->h <= 0) {
+        mark_renderer_dirty_full(renderer);
+        return;
+    }
+
+    if (!state->dirty || state->full) {
+        state->dirty = 1;
+        state->full = 0;
+        state->x = rect->x;
+        state->y = rect->y;
+        state->w = rect->w;
+        state->h = rect->h;
+        return;
+    }
+
+    x2 = state->x + state->w;
+    y2 = state->y + state->h;
+    if (rect->x < state->x)
+        state->x = rect->x;
+    if (rect->y < state->y)
+        state->y = rect->y;
+    if (rect->x + rect->w > x2)
+        x2 = rect->x + rect->w;
+    if (rect->y + rect->h > y2)
+        y2 = rect->y + rect->h;
+    state->w = x2 - state->x;
+    state->h = y2 - state->y;
+}
+
+static void clear_renderer_dirty(void *renderer) {
+    sdl_dirty_state_t *state = dirty_state_for_renderer(renderer, 0);
+
+    if (!state)
+        return;
+
+    state->dirty = 0;
+    state->full = 0;
+    state->x = 0;
+    state->y = 0;
+    state->w = 0;
+    state->h = 0;
+}
+
+static void snapshot_renderer_dirty(void *renderer, sdl_dirty_snapshot_t *out) {
+    sdl_dirty_state_t *state = dirty_state_for_renderer(renderer, 0);
+
+    if (!out)
+        return;
+
+    memset(out, 0, sizeof(*out));
+    if (!state || !state->dirty)
+        return;
+
+    out->dirty = 1;
+    out->full = state->full;
+    out->x = state->x;
+    out->y = state->y;
+    out->w = state->w;
+    out->h = state->h;
+}
+
+static uint32_t bump_slot_save_serial(int idx) {
+    slot_save_serial[idx]++;
+    if (slot_save_serial[idx] == 0)
+        slot_save_serial[idx] = 1;
+    return slot_save_serial[idx];
+}
+
+static int slot_capture_rect_for_bounds(int x, int y, int w, int h,
+                                        vr_sdl_rect_t *out_rect) {
+    int x0;
+    int y0;
+    int x1;
+    int y1;
+
+    if (!out_rect || w <= 0 || h <= 0)
+        return 0;
+
+    x0 = x - VR_SLOT_SAVE_PAD;
+    y0 = y - VR_SLOT_SAVE_PAD;
+    x1 = x + w + VR_SLOT_SAVE_PAD;
+    y1 = y + h + VR_SLOT_SAVE_PAD;
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (shm && shm_ok && shm->fb_width > 0 && x1 > shm->fb_width)
+        x1 = shm->fb_width;
+    if (shm && shm_ok && shm->fb_height > 0 && y1 > shm->fb_height)
+        y1 = shm->fb_height;
+
+    if (x1 - x0 > VARNISH_SLOT_MAX_W) {
+        x0 = x;
+        x1 = x + w;
+    }
+    if (y1 - y0 > VARNISH_SLOT_MAX_H) {
+        y0 = y;
+        y1 = y + h;
+    }
+
+    if (x1 <= x0 || y1 <= y0)
+        return 0;
+
+    out_rect->x = x0;
+    out_rect->y = y0;
+    out_rect->w = x1 - x0;
+    out_rect->h = y1 - y0;
+    return 1;
+}
+
+static int current_slot_capture_rect(int idx, vr_sdl_rect_t *out_rect) {
+    if (!slot_cached_active[idx])
+        return 0;
+
+    return slot_capture_rect_for_bounds(slot_cached_x[idx], slot_cached_y[idx],
+                                        slot_cached_w[idx], slot_cached_h[idx],
+                                        out_rect);
+}
+
+static int slot_save_matches_current(void *renderer, int idx) {
+    vr_sdl_rect_t rect;
+
+    if (!current_slot_capture_rect(idx, &rect))
+        return 0;
+
+    return slot_save_valid[idx] &&
+           slot_save_renderer[idx] == renderer &&
+           slot_save_x[idx] == rect.x &&
+           slot_save_y[idx] == rect.y &&
+           slot_save_w[idx] == rect.w &&
+           slot_save_h[idx] == rect.h;
+}
+
+static int read_renderer_region(void *renderer, int x, int y, int w, int h,
+                                uint32_t *out_pixels) {
+    vr_sdl_rect_t rect;
+    int pixel_count;
+
+    if (!renderer || !out_pixels || !pfn_RenderReadPixels)
+        return 0;
+    if (w <= 0 || h <= 0 || w > VARNISH_SLOT_MAX_W || h > VARNISH_SLOT_MAX_H)
+        return 0;
+
+    rect.x = x;
+    rect.y = y;
+    rect.w = w;
+    rect.h = h;
+
+    if (pfn_RenderReadPixels(renderer, &rect, VR_SDL_PIXELFORMAT_ARGB8888,
+                             out_pixels, w * (int)sizeof(uint32_t)) != 0)
+        return 0;
+
+    pixel_count = w * h;
+    for (int i = 0; i < pixel_count; i++)
+        out_pixels[i] |= 0xFF000000u;
+
+    return 1;
+}
+
+static void ensure_slot_save_texture(void *renderer, int idx, int w, int h) {
+    if (!renderer || !pfn_CreateTexture)
+        return;
+
+    if (slot_save_texture[idx] &&
+        (slot_save_renderer[idx] != renderer ||
+         slot_save_w[idx] != w || slot_save_h[idx] != h)) {
+        pfn_DestroyTexture(slot_save_texture[idx]);
+        slot_save_texture[idx] = NULL;
+    }
+
+    if (!slot_save_texture[idx]) {
+        slot_save_texture[idx] = pfn_CreateTexture(
+            renderer, VR_SDL_PIXELFORMAT_ARGB8888,
+            VR_SDL_TEXTUREACCESS_STREAMING, w, h);
+        if (!slot_save_texture[idx])
+            return;
+        if (pfn_SetBlendMode)
+            pfn_SetBlendMode(slot_save_texture[idx], VR_SDL_BLENDMODE_NONE);
+    }
+}
+
+static void ensure_slot_cleanup_texture(void *renderer, int idx, int w, int h) {
+    if (!renderer || !pfn_CreateTexture)
+        return;
+
+    if (slot_cleanup_texture[idx] &&
+        (slot_cleanup_renderer[idx] != renderer ||
+         slot_cleanup_w[idx] != w || slot_cleanup_h[idx] != h)) {
+        pfn_DestroyTexture(slot_cleanup_texture[idx]);
+        slot_cleanup_texture[idx] = NULL;
+    }
+
+    if (!slot_cleanup_texture[idx]) {
+        slot_cleanup_texture[idx] = pfn_CreateTexture(
+            renderer, VR_SDL_PIXELFORMAT_ARGB8888,
+            VR_SDL_TEXTUREACCESS_STREAMING, w, h);
+        if (!slot_cleanup_texture[idx])
+            return;
+        if (pfn_SetBlendMode)
+            pfn_SetBlendMode(slot_cleanup_texture[idx], VR_SDL_BLENDMODE_NONE);
+    }
+}
+
+static int store_slot_saved_background(void *renderer, int idx,
+                                       int x, int y, int w, int h,
+                                       const uint32_t *pixels) {
+    size_t bytes;
+
+    if (!renderer || !pixels)
+        return 0;
+    if (w <= 0 || h <= 0 || w > VARNISH_SLOT_MAX_W || h > VARNISH_SLOT_MAX_H)
+        return 0;
+
+    bytes = (size_t)w * (size_t)h * sizeof(uint32_t);
+    if (pixels != slot_save_pixels[idx])
+        memcpy(slot_save_pixels[idx], pixels, bytes);
+
+    ensure_slot_save_texture(renderer, idx, w, h);
+    if (slot_save_texture[idx] && pfn_UpdateTexture) {
+        pfn_UpdateTexture(slot_save_texture[idx], NULL, slot_save_pixels[idx],
+                          w * (int)sizeof(uint32_t));
+    }
+
+    slot_save_renderer[idx] = renderer;
+    slot_save_x[idx] = x;
+    slot_save_y[idx] = y;
+    slot_save_w[idx] = w;
+    slot_save_h[idx] = h;
+    slot_save_valid[idx] = 1;
+    bump_slot_save_serial(idx);
+    return 1;
+}
+
+static int capture_current_slot_background(void *renderer, int idx) {
+    vr_sdl_rect_t rect;
+
+    if (!current_slot_capture_rect(idx, &rect))
+        return 0;
+
+    if (!read_renderer_region(renderer,
+                              rect.x, rect.y,
+                              rect.w, rect.h,
+                              slot_readback))
+        return 0;
+
+    return store_slot_saved_background(renderer, idx,
+                                       rect.x, rect.y,
+                                       rect.w, rect.h,
+                                       slot_readback);
+}
+
+static void invalidate_slot_cleanup(int idx) {
+    slot_cleanup_valid[idx] = 0;
+    slot_cleanup_frames[idx] = 0;
+    slot_cleanup_composited_valid[idx] = 0;
+}
+
+static unsigned pixel_channel_diff(uint32_t a, uint32_t b) {
+    return (a > b) ? (a - b) : (b - a);
+}
+
+static int pixel_matches_composited(uint32_t current, uint32_t composited) {
+    unsigned current_r = (current >> 16) & 0xFFu;
+    unsigned current_g = (current >> 8) & 0xFFu;
+    unsigned current_b = current & 0xFFu;
+    unsigned composited_r = (composited >> 16) & 0xFFu;
+    unsigned composited_g = (composited >> 8) & 0xFFu;
+    unsigned composited_b = composited & 0xFFu;
+
+    return pixel_channel_diff(current_r, composited_r) <= VR_SLOT_RESTORE_TOLERANCE &&
+           pixel_channel_diff(current_g, composited_g) <= VR_SLOT_RESTORE_TOLERANCE &&
+           pixel_channel_diff(current_b, composited_b) <= VR_SLOT_RESTORE_TOLERANCE;
+}
+
+static void queue_slot_cleanup(int idx) {
+    size_t bytes;
+
+    if (!slot_save_valid[idx])
+        return;
+
+    bytes = (size_t)slot_save_w[idx] * (size_t)slot_save_h[idx] * sizeof(uint32_t);
+    memcpy(slot_cleanup_pixels[idx], slot_save_pixels[idx], bytes);
+    if (slot_last_composited_valid[idx]) {
+        memcpy(slot_cleanup_composited[idx], slot_last_composited[idx], bytes);
+        slot_cleanup_composited_valid[idx] = 1;
+    } else {
+        slot_cleanup_composited_valid[idx] = 0;
+    }
+
+    slot_cleanup_renderer[idx] = slot_save_renderer[idx];
+    slot_cleanup_x[idx] = slot_save_x[idx];
+    slot_cleanup_y[idx] = slot_save_y[idx];
+    slot_cleanup_w[idx] = slot_save_w[idx];
+    slot_cleanup_h[idx] = slot_save_h[idx];
+    slot_cleanup_valid[idx] = 1;
+    slot_cleanup_frames[idx] = VR_SLOT_CLEANUP_FRAMES;
+}
+
+static void invalidate_slot_saved_background(int idx) {
+    slot_save_valid[idx] = 0;
+    slot_save_serial[idx] = 0;
+    slot_last_composited_valid[idx] = 0;
+}
+
+static int restore_slot_background(void *renderer, int idx) {
+    vr_sdl_rect_t dst;
+    const uint32_t *restore_pixels = slot_save_pixels[idx];
+
+    if (!slot_save_valid[idx] || !renderer || !pfn_RenderCopy)
+        return 0;
+    if (slot_save_renderer[idx] != renderer)
+        return 0;
+
+    ensure_slot_save_texture(renderer, idx, slot_save_w[idx], slot_save_h[idx]);
+    if (!slot_save_texture[idx] || !pfn_UpdateTexture)
+        return 0;
+
+    if (slot_last_composited_valid[idx] &&
+        read_renderer_region(renderer,
+                             slot_save_x[idx], slot_save_y[idx],
+                             slot_save_w[idx], slot_save_h[idx],
+                             slot_readback)) {
+        int pixel_count = slot_save_w[idx] * slot_save_h[idx];
+        for (int i = 0; i < pixel_count; i++) {
+            if (pixel_matches_composited(slot_readback[i],
+                                         slot_last_composited[idx][i]))
+                slot_composited[i] = slot_save_pixels[idx][i];
+            else
+                slot_composited[i] = slot_readback[i];
+        }
+        restore_pixels = slot_composited;
+    }
+
+    pfn_UpdateTexture(slot_save_texture[idx], NULL, restore_pixels,
+                      slot_save_w[idx] * (int)sizeof(uint32_t));
+
+    dst.x = slot_save_x[idx];
+    dst.y = slot_save_y[idx];
+    dst.w = slot_save_w[idx];
+    dst.h = slot_save_h[idx];
+    return pfn_RenderCopy(renderer, slot_save_texture[idx], NULL, &dst) == 0;
+}
+
+static int restore_slot_cleanup(void *renderer, int idx) {
+    vr_sdl_rect_t dst;
+    const uint32_t *restore_pixels = slot_cleanup_pixels[idx];
+
+    if (!slot_cleanup_valid[idx] || slot_cleanup_frames[idx] <= 0 ||
+        !renderer || !pfn_RenderCopy)
+        return 0;
+    if (slot_cleanup_renderer[idx] != renderer)
+        return 0;
+
+    ensure_slot_cleanup_texture(renderer, idx, slot_cleanup_w[idx], slot_cleanup_h[idx]);
+    if (!slot_cleanup_texture[idx] || !pfn_UpdateTexture)
+        return 0;
+
+    if (slot_cleanup_composited_valid[idx] &&
+        read_renderer_region(renderer,
+                             slot_cleanup_x[idx], slot_cleanup_y[idx],
+                             slot_cleanup_w[idx], slot_cleanup_h[idx],
+                             slot_readback)) {
+        int pixel_count = slot_cleanup_w[idx] * slot_cleanup_h[idx];
+        for (int i = 0; i < pixel_count; i++) {
+            if (pixel_matches_composited(slot_readback[i],
+                                         slot_cleanup_composited[idx][i]))
+                slot_composited[i] = slot_cleanup_pixels[idx][i];
+            else
+                slot_composited[i] = slot_readback[i];
+        }
+        restore_pixels = slot_composited;
+    }
+
+    pfn_UpdateTexture(slot_cleanup_texture[idx], NULL, restore_pixels,
+                      slot_cleanup_w[idx] * (int)sizeof(uint32_t));
+
+    dst.x = slot_cleanup_x[idx];
+    dst.y = slot_cleanup_y[idx];
+    dst.w = slot_cleanup_w[idx];
+    dst.h = slot_cleanup_h[idx];
+    if (pfn_RenderCopy(renderer, slot_cleanup_texture[idx], NULL, &dst) != 0)
+        return 0;
+
+    slot_cleanup_frames[idx]--;
+    if (slot_cleanup_frames[idx] <= 0)
+        invalidate_slot_cleanup(idx);
+    return 1;
+}
+
+static int has_pending_slot_cleanup(void) {
+    for (int i = 0; i < VARNISH_MAX_SLOTS; i++) {
+        if (slot_cleanup_valid[i] && slot_cleanup_frames[i] > 0)
+            return 1;
+    }
+    return 0;
+}
+
+static void apply_slot_cleanups(void *renderer) {
+    for (int i = 0; i < VARNISH_MAX_SLOTS; i++)
+        (void)restore_slot_cleanup(renderer, i);
+}
+
+static void sync_slot_background_state(void *renderer, int idx,
+                                       const sdl_dirty_snapshot_t *dirty) {
+    (void)dirty;
+    int save_matches_current = slot_save_matches_current(renderer, idx);
+    int stale_saved_rect = slot_save_valid[idx] &&
+        (!slot_cached_active[idx] || !save_matches_current);
+
+    if (stale_saved_rect) {
+        queue_slot_cleanup(idx);
+        invalidate_slot_saved_background(idx);
+        save_matches_current = 0;
+    }
+
+    if (!slot_cached_active[idx])
+        return;
+
+    if (save_matches_current)
+        return;
+
+    (void)capture_current_slot_background(renderer, idx);
+}
+
+static int collect_active_slots(int *order);
+
+static int prepare_sdl_overlays(void *renderer,
+                                const sdl_dirty_snapshot_t *dirty,
+                                int *order) {
+    (void)dirty;
+    int count = collect_active_slots(order);
+
+    for (int i = 0; i < VARNISH_MAX_SLOTS; i++) {
+        int save_matches_current = slot_save_matches_current(renderer, i);
+        int stale_saved_rect = slot_save_valid[i] &&
+            (!slot_cached_active[i] || !save_matches_current);
+
+        if (stale_saved_rect)
+            queue_slot_cleanup(i);
+        if (stale_saved_rect)
+            invalidate_slot_saved_background(i);
+    }
+
+    apply_slot_cleanups(renderer);
+
+    for (int i = 0; i < VARNISH_MAX_SLOTS; i++) {
+        if (!slot_cached_active[i])
+            continue;
+        if (slot_save_matches_current(renderer, i))
+            continue;
+        (void)capture_current_slot_background(renderer, i);
+    }
+
+    return count;
 }
 
 /* ── Per-slot seqlock read helpers ──────────────────────────────── */
@@ -505,9 +1060,17 @@ static int slot_refresh_cache(int idx) {
 /* ── Multi-slot overlay drawing ─────────────────────────────────── */
 
 static void draw_slot(void *renderer, int idx) {
-    typedef struct { int x, y, w, h; } SDL_Rect;
-    SDL_Rect dst;
+    vr_sdl_rect_t dst;
+    int render_x = slot_cached_x[idx];
+    int render_y = slot_cached_y[idx];
+    int render_w = slot_cached_w[idx];
+    int render_h = slot_cached_h[idx];
+    int pill_offset_x = 0;
+    int pill_offset_y = 0;
+    const uint32_t *upload_pixels = slot_cached_pixels[idx];
+    size_t upload_bytes;
     int w, h, pixel_count;
+    uint32_t save_serial = 0;
 
     /* Cache is already refreshed by collect_active_slots().  Do NOT call
        slot_refresh_cache() here — it could update position/size between
@@ -519,68 +1082,98 @@ static void draw_slot(void *renderer, int idx) {
 
     w = slot_cached_w[idx];
     h = slot_cached_h[idx];
+    if (slot_save_valid[idx] &&
+        slot_save_renderer[idx] == renderer &&
+        slot_cached_x[idx] >= slot_save_x[idx] &&
+        slot_cached_y[idx] >= slot_save_y[idx] &&
+        slot_cached_x[idx] + w <= slot_save_x[idx] + slot_save_w[idx] &&
+        slot_cached_y[idx] + h <= slot_save_y[idx] + slot_save_h[idx]) {
+        render_x = slot_save_x[idx];
+        render_y = slot_save_y[idx];
+        render_w = slot_save_w[idx];
+        render_h = slot_save_h[idx];
+        pill_offset_x = slot_cached_x[idx] - slot_save_x[idx];
+        pill_offset_y = slot_cached_y[idx] - slot_save_y[idx];
+        save_serial = slot_save_serial[idx];
+    }
 
     /* Recreate texture if renderer or dimensions changed */
     if (slot_texture[idx] &&
         (slot_tex_renderer[idx] != renderer ||
-         slot_tex_w[idx] != w || slot_tex_h[idx] != h)) {
+         slot_tex_w[idx] != render_w || slot_tex_h[idx] != render_h)) {
         pfn_DestroyTexture(slot_texture[idx]);
         slot_texture[idx] = NULL;
+        slot_texture_frame_id[idx] = UINT32_MAX;
+        slot_texture_save_serial[idx] = UINT32_MAX;
     }
 
     if (!slot_texture[idx]) {
         slot_texture[idx] = pfn_CreateTexture(
             renderer, VR_SDL_PIXELFORMAT_ARGB8888,
-            VR_SDL_TEXTUREACCESS_STREAMING, w, h);
+            VR_SDL_TEXTUREACCESS_STREAMING, render_w, render_h);
         if (!slot_texture[idx]) return;
         pfn_SetBlendMode(slot_texture[idx], VR_SDL_BLENDMODE_NONE);
         slot_tex_renderer[idx] = renderer;
-        slot_tex_w[idx] = w;
-        slot_tex_h[idx] = h;
+        slot_tex_w[idx] = render_w;
+        slot_tex_h[idx] = render_h;
+        slot_texture_frame_id[idx] = UINT32_MAX;
+        slot_texture_save_serial[idx] = UINT32_MAX;
     }
 
-    /* Software compositing: blend pill pixels over the saved background
-       on the CPU and upload a fully opaque result.  This bypasses SDL's
-       texture alpha blending which doesn't work correctly on some embedded
-       framebuffer-backed renderers (black rectangle around pills). */
-    pixel_count = w * h;
-    if (slot_save_valid[idx] &&
-        slot_save_w[idx] == w && slot_save_h[idx] == h) {
-        const uint32_t *pill = slot_cached_pixels[idx];
-        const uint32_t *bg   = slot_save_pixels[idx];
-        for (int i = 0; i < pixel_count; i++) {
-            uint32_t src = pill[i];
-            uint32_t a = (src >> 24) & 0xFFu;
-            if (a == 0xFFu) {
-                slot_composited[i] = src;
-            } else if (a == 0) {
-                slot_composited[i] = bg[i] | 0xFF000000u;
-            } else {
-                uint32_t inv_a = 255u - a;
-                uint32_t sr = (src >> 16) & 0xFFu;
-                uint32_t sg = (src >> 8)  & 0xFFu;
-                uint32_t sb =  src        & 0xFFu;
-                uint32_t dr = (bg[i] >> 16) & 0xFFu;
-                uint32_t dg = (bg[i] >> 8)  & 0xFFu;
-                uint32_t db =  bg[i]        & 0xFFu;
-                uint32_t r = (sr * a + dr * inv_a + 127u) / 255u;
-                uint32_t g = (sg * a + dg * inv_a + 127u) / 255u;
-                uint32_t b = (sb * a + db * inv_a + 127u) / 255u;
-                slot_composited[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
+    if (slot_texture_frame_id[idx] != slot_cached_frame_id[idx] ||
+        slot_texture_save_serial[idx] != save_serial) {
+        /* Software compositing: blend pill pixels over the saved background
+           on the CPU and upload a fully opaque result.  This bypasses SDL's
+           texture alpha blending which doesn't work correctly on some embedded
+           framebuffer-backed renderers (black rectangle around pills). */
+        pixel_count = render_w * render_h;
+        if (save_serial != 0) {
+            const uint32_t *pill = slot_cached_pixels[idx];
+            memcpy(slot_composited, slot_save_pixels[idx],
+                   (size_t)pixel_count * sizeof(uint32_t));
+            for (int py = 0; py < h; py++) {
+                for (int px = 0; px < w; px++) {
+                    int bg_index = (pill_offset_y + py) * render_w + (pill_offset_x + px);
+                    int pill_index = py * w + px;
+                    uint32_t src = pill[pill_index];
+                    uint32_t a = (src >> 24) & 0xFFu;
+                    uint32_t bg = slot_composited[bg_index];
+
+                    if (a == 0xFFu) {
+                        slot_composited[bg_index] = src;
+                    } else if (a == 0) {
+                        slot_composited[bg_index] = bg | 0xFF000000u;
+                    } else {
+                        uint32_t inv_a = 255u - a;
+                        uint32_t sr = (src >> 16) & 0xFFu;
+                        uint32_t sg = (src >> 8)  & 0xFFu;
+                        uint32_t sb =  src        & 0xFFu;
+                        uint32_t dr = (bg >> 16) & 0xFFu;
+                        uint32_t dg = (bg >> 8)  & 0xFFu;
+                        uint32_t db =  bg        & 0xFFu;
+                        uint32_t r = (sr * a + dr * inv_a + 127u) / 255u;
+                        uint32_t g = (sg * a + dg * inv_a + 127u) / 255u;
+                        uint32_t b = (sb * a + db * inv_a + 127u) / 255u;
+                        slot_composited[bg_index] = 0xFF000000u | (r << 16) | (g << 8) | b;
+                    }
+                }
             }
+            upload_pixels = slot_composited;
         }
-        pfn_UpdateTexture(slot_texture[idx], NULL, slot_composited,
-                          w * (int)sizeof(uint32_t));
-    } else {
-        /* No saved background — fall back to raw pill pixels */
-        pfn_UpdateTexture(slot_texture[idx], NULL, slot_cached_pixels[idx],
-                          w * (int)sizeof(uint32_t));
+
+        upload_bytes = (size_t)pixel_count * sizeof(uint32_t);
+        memcpy(slot_last_composited[idx], upload_pixels, upload_bytes);
+        slot_last_composited_valid[idx] = 1;
+        pfn_UpdateTexture(slot_texture[idx], NULL, upload_pixels,
+                          render_w * (int)sizeof(uint32_t));
+        slot_texture_frame_id[idx] = slot_cached_frame_id[idx];
+        slot_texture_save_serial[idx] = save_serial;
     }
 
-    dst.x = slot_cached_x[idx];
-    dst.y = slot_cached_y[idx];
-    dst.w = w;
-    dst.h = h;
+    dst.x = render_x;
+    dst.y = render_y;
+    dst.w = render_w;
+    dst.h = render_h;
     pfn_RenderCopy(renderer, slot_texture[idx], NULL, &dst);
 }
 
@@ -959,92 +1552,14 @@ static int draw_all_gl_overlays(void *window) {
     return count;
 }
 
-/* ── Per-slot background save / restore ────────────────────────── */
-
-static void save_slot_background(void *renderer, int idx) {
-    typedef struct { int x, y, w, h; } SDL_Rect;
-    SDL_Rect rect;
-
-    if (!pfn_RenderReadPixels) return;
-
-    rect.x = slot_cached_x[idx];
-    rect.y = slot_cached_y[idx];
-    rect.w = slot_cached_w[idx];
-    rect.h = slot_cached_h[idx];
-
-    if (rect.w <= 0 || rect.h <= 0 ||
-        rect.w > VARNISH_SLOT_MAX_W || rect.h > VARNISH_SLOT_MAX_H)
-        return;
-
-    if (pfn_RenderReadPixels(renderer, &rect, VR_SDL_PIXELFORMAT_ARGB8888,
-                              slot_save_pixels[idx],
-                              rect.w * (int)sizeof(uint32_t)) != 0)
-        return;
-
-    /* Force alpha=255 on all saved pixels.  Some renderers (framebuffer-
-       backed, no alpha channel) return alpha=0 from SDL_RenderReadPixels.
-       Without this, restored backgrounds become transparent-black, causing
-       a visible black rectangle around pills during idle presents. */
-    {
-        int pixel_count = rect.w * rect.h;
-        for (int i = 0; i < pixel_count; i++)
-            slot_save_pixels[idx][i] |= 0xFF000000u;
-    }
-
-    /* Recreate save texture if renderer or dimensions changed */
-    if (slot_save_texture[idx] &&
-        (slot_save_renderer[idx] != renderer ||
-         slot_save_w[idx] != rect.w || slot_save_h[idx] != rect.h)) {
-        pfn_DestroyTexture(slot_save_texture[idx]);
-        slot_save_texture[idx] = NULL;
-    }
-
-    if (!slot_save_texture[idx]) {
-        if (!pfn_CreateTexture) return;
-        slot_save_texture[idx] = pfn_CreateTexture(
-            renderer, VR_SDL_PIXELFORMAT_ARGB8888,
-            VR_SDL_TEXTUREACCESS_STREAMING, rect.w, rect.h);
-        if (!slot_save_texture[idx]) return;
-        pfn_SetBlendMode(slot_save_texture[idx], VR_SDL_BLENDMODE_NONE);
-        slot_save_renderer[idx] = renderer;
-    }
-
-    pfn_UpdateTexture(slot_save_texture[idx], NULL, slot_save_pixels[idx],
-                      rect.w * (int)sizeof(uint32_t));
-
-    slot_save_x[idx] = rect.x;
-    slot_save_y[idx] = rect.y;
-    slot_save_w[idx] = rect.w;
-    slot_save_h[idx] = rect.h;
-    slot_save_valid[idx] = 1;
-}
-
-static void restore_slot_background(void *renderer, int idx) {
-    typedef struct { int x, y, w, h; } SDL_Rect;
-    SDL_Rect dst;
-
-    if (!slot_save_valid[idx] || !slot_save_texture[idx] || !pfn_RenderCopy)
-        return;
-    if (slot_save_renderer[idx] != renderer)
-        return;
-
-    dst.x = slot_save_x[idx];
-    dst.y = slot_save_y[idx];
-    dst.w = slot_save_w[idx];
-    dst.h = slot_save_h[idx];
-    pfn_RenderCopy(renderer, slot_save_texture[idx], NULL, &dst);
-}
-
-static void restore_all_backgrounds(void *renderer) {
-    for (int i = 0; i < VARNISH_MAX_SLOTS; i++)
-        restore_slot_background(renderer, i);
-}
-
 /* ── Idle-present forcing ──────────────────────────────────────── */
 
 static void maybe_force_idle_present(void) {
     int i;
     int need_present = 0;
+    int order[VARNISH_MAX_SLOTS];
+    int count;
+    sdl_dirty_snapshot_t dirty = {0};
 
     if (force_present_guard) return;
     if (!last_renderer || render_tid < 0) return;
@@ -1059,6 +1574,10 @@ static void maybe_force_idle_present(void) {
 
     /* Check if any slot has a new frame we haven't presented yet */
     for (i = 0; i < VARNISH_MAX_SLOTS; i++) {
+        if (slot_cleanup_valid[i] && slot_cleanup_frames[i] > 0) {
+            need_present = 1;
+            break;
+        }
         uint32_t frame_id;
         if (slot_read_committed_frame_id(i, &frame_id) == 0 &&
             frame_id != last_present_frame_ids[i]) {
@@ -1067,23 +1586,15 @@ static void maybe_force_idle_present(void) {
         }
     }
 
+    if (!need_present && has_pending_slot_cleanup())
+        need_present = 1;
     if (!need_present) return;
+    snapshot_renderer_dirty(last_renderer, &dirty);
+    if (dirty.dirty) return;
 
-    /*
-     * Restore saved backgrounds to erase previously-drawn pills, then
-     * composite current overlays fresh.  For newly-active slots that
-     * appeared during idle (no prior save), capture their background
-     * from the current back buffer before drawing.
-     */
     force_present_guard = 1;
-    restore_all_backgrounds(last_renderer);
     if (__builtin_expect(sdl_funcs_ok, 1)) {
-        int order[VARNISH_MAX_SLOTS];
-        int count = collect_active_slots(order);
-        for (i = 0; i < count; i++) {
-            if (!slot_save_valid[order[i]])
-                save_slot_background(last_renderer, order[i]);
-        }
+        count = prepare_sdl_overlays(last_renderer, &dirty, order);
         for (i = 0; i < count; i++)
             draw_slot(last_renderer, order[i]);
     }
@@ -1098,6 +1609,7 @@ static void maybe_force_idle_present(void) {
 void SDL_RenderPresent(void *renderer) {
     int order[VARNISH_MAX_SLOTS];
     int count;
+    sdl_dirty_snapshot_t dirty = {0};
 
     if (__builtin_expect(!real_present, 0)) {
         real_present = (fn_SDL_RenderPresent)dlsym(RTLD_NEXT, "SDL_RenderPresent");
@@ -1107,25 +1619,16 @@ void SDL_RenderPresent(void *renderer) {
 
     last_renderer = renderer;
     render_tid = current_tid();
+    snapshot_renderer_dirty(renderer, &dirty);
 
     if (__builtin_expect(sdl_funcs_ok, 1)) {
-        count = collect_active_slots(order);
-
-        if (count > 0) {
-            /* Save the clean region behind each pill BEFORE drawing.
-             * Per-slot region readback: ~72KB per pill vs 3MB full frame. */
-            for (int i = 0; i < count; i++)
-                save_slot_background(renderer, order[i]);
-            for (int i = 0; i < count; i++)
-                draw_slot(renderer, order[i]);
-        } else {
-            /* No overlays — invalidate all stale saves */
-            for (int i = 0; i < VARNISH_MAX_SLOTS; i++)
-                slot_save_valid[i] = 0;
-        }
+        count = prepare_sdl_overlays(renderer, &dirty, order);
+        for (int i = 0; i < count; i++)
+            draw_slot(renderer, order[i]);
     }
 
     real_present(renderer);
+    clear_renderer_dirty(renderer);
     for (int i = 0; i < VARNISH_MAX_SLOTS; i++)
         last_present_frame_ids[i] = slot_cached_frame_id[i];
 }
@@ -1153,6 +1656,101 @@ void SDL_Delay(uint32_t ms) {
 
     maybe_force_idle_present();
     real_delay(ms);
+}
+
+int SDL_RenderClear(void *renderer) {
+    int rc;
+
+    if (__builtin_expect(!pfn_RenderClear, 0)) {
+        pfn_RenderClear = (fn_SDL_RenderClear)resolve_symbol_any("SDL_RenderClear");
+        if (!pfn_RenderClear)
+            return -1;
+    }
+
+    rc = pfn_RenderClear(renderer);
+    if (rc == 0)
+        mark_renderer_dirty_full(renderer);
+    return rc;
+}
+
+int SDL_RenderCopy(void *renderer, void *texture, const void *src_rect, const void *dst_rect) {
+    int rc;
+
+    if (__builtin_expect(!pfn_RenderCopy, 0)) {
+        pfn_RenderCopy = (fn_SDL_RenderCopy)resolve_symbol_any("SDL_RenderCopy");
+        if (!pfn_RenderCopy)
+            return -1;
+    }
+
+    rc = pfn_RenderCopy(renderer, texture, src_rect, dst_rect);
+    if (rc == 0) {
+        if (dst_rect)
+            mark_renderer_dirty_rect(renderer, (const vr_sdl_rect_t *)dst_rect);
+        else
+            mark_renderer_dirty_full(renderer);
+    }
+    return rc;
+}
+
+int SDL_RenderCopyEx(void *renderer, void *texture, const void *src_rect, const void *dst_rect,
+                     double angle, const void *center, int flip) {
+    int rc;
+
+    if (__builtin_expect(!pfn_RenderCopyEx, 0)) {
+        pfn_RenderCopyEx = (fn_SDL_RenderCopyEx)resolve_symbol_any("SDL_RenderCopyEx");
+        if (!pfn_RenderCopyEx)
+            return -1;
+    }
+
+    rc = pfn_RenderCopyEx(renderer, texture, src_rect, dst_rect, angle, center, flip);
+    if (rc == 0) {
+        if (dst_rect)
+            mark_renderer_dirty_rect(renderer, (const vr_sdl_rect_t *)dst_rect);
+        else
+            mark_renderer_dirty_full(renderer);
+    }
+    return rc;
+}
+
+int SDL_RenderFillRect(void *renderer, const void *rect) {
+    int rc;
+
+    if (__builtin_expect(!pfn_RenderFillRect, 0)) {
+        pfn_RenderFillRect = (fn_SDL_RenderFillRect)resolve_symbol_any("SDL_RenderFillRect");
+        if (!pfn_RenderFillRect)
+            return -1;
+    }
+
+    rc = pfn_RenderFillRect(renderer, rect);
+    if (rc == 0) {
+        if (rect)
+            mark_renderer_dirty_rect(renderer, (const vr_sdl_rect_t *)rect);
+        else
+            mark_renderer_dirty_full(renderer);
+    }
+    return rc;
+}
+
+int SDL_RenderFillRects(void *renderer, const void *rects, int count) {
+    int rc;
+
+    if (__builtin_expect(!pfn_RenderFillRects, 0)) {
+        pfn_RenderFillRects = (fn_SDL_RenderFillRects)resolve_symbol_any("SDL_RenderFillRects");
+        if (!pfn_RenderFillRects)
+            return -1;
+    }
+
+    rc = pfn_RenderFillRects(renderer, rects, count);
+    if (rc == 0 && count > 0) {
+        const vr_sdl_rect_t *fill_rects = (const vr_sdl_rect_t *)rects;
+        if (!fill_rects) {
+            mark_renderer_dirty_full(renderer);
+        } else {
+            for (int i = 0; i < count; i++)
+                mark_renderer_dirty_rect(renderer, &fill_rects[i]);
+        }
+    }
+    return rc;
 }
 
 int SDL_PollEvent(void *event) {
