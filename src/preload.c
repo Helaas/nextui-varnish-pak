@@ -504,7 +504,10 @@ static void draw_slot(void *renderer, int idx) {
     typedef struct { int x, y, w, h; } SDL_Rect;
     SDL_Rect dst;
 
-    slot_refresh_cache(idx);
+    /* Cache is already refreshed by collect_active_slots().  Do NOT call
+       slot_refresh_cache() here — it could update position/size between
+       the save_slot_background() and draw_slot() passes, causing the
+       saved background region to not match the drawn pill region. */
 
     if (!slot_cached_active[idx] || slot_cached_w[idx] <= 0 || slot_cached_h[idx] <= 0)
         return;
@@ -897,7 +900,6 @@ static int draw_all_gl_overlays(void *window) {
         float top;
         float bottom;
 
-        slot_refresh_cache(idx);
         if (!gl_ensure_slot_texture(idx))
             continue;
 
@@ -942,6 +944,16 @@ static void save_slot_background(void *renderer, int idx) {
                               slot_save_pixels[idx],
                               rect.w * (int)sizeof(uint32_t)) != 0)
         return;
+
+    /* Force alpha=255 on all saved pixels.  Some renderers (framebuffer-
+       backed, no alpha channel) return alpha=0 from SDL_RenderReadPixels.
+       Without this, restored backgrounds become transparent-black, causing
+       a visible black rectangle around pills during idle presents. */
+    {
+        int pixel_count = rect.w * rect.h;
+        for (int i = 0; i < pixel_count; i++)
+            slot_save_pixels[idx][i] |= 0xFF000000u;
+    }
 
     /* Recreate save texture if renderer or dimensions changed */
     if (slot_save_texture[idx] &&
