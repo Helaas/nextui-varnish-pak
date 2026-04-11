@@ -33,6 +33,7 @@
 
 #define VR_SDL_PIXELFORMAT_ARGB8888     0x16362004u
 #define VR_SDL_TEXTUREACCESS_STREAMING  1
+#define VR_SDL_BLENDMODE_NONE           0
 #define VR_SDL_BLENDMODE_BLEND          1
 
 /* ── Minimal GL declarations (resolved at runtime) ─────────────── */
@@ -250,6 +251,9 @@ static int      slot_save_y[VARNISH_MAX_SLOTS];
 static int      slot_save_w[VARNISH_MAX_SLOTS];
 static int      slot_save_h[VARNISH_MAX_SLOTS];
 static int      slot_save_valid[VARNISH_MAX_SLOTS];
+
+/* Software compositing buffer — reused per-slot (single render thread) */
+static uint32_t slot_composited[VARNISH_SLOT_MAX_W * VARNISH_SLOT_MAX_H];
 
 /* ── Init helpers ───────────────────────────────────────────────── */
 
@@ -503,6 +507,7 @@ static int slot_refresh_cache(int idx) {
 static void draw_slot(void *renderer, int idx) {
     typedef struct { int x, y, w, h; } SDL_Rect;
     SDL_Rect dst;
+    int w, h, pixel_count;
 
     /* Cache is already refreshed by collect_active_slots().  Do NOT call
        slot_refresh_cache() here — it could update position/size between
@@ -512,39 +517,70 @@ static void draw_slot(void *renderer, int idx) {
     if (!slot_cached_active[idx] || slot_cached_w[idx] <= 0 || slot_cached_h[idx] <= 0)
         return;
 
+    w = slot_cached_w[idx];
+    h = slot_cached_h[idx];
+
     /* Recreate texture if renderer or dimensions changed */
     if (slot_texture[idx] &&
         (slot_tex_renderer[idx] != renderer ||
-         slot_tex_w[idx] != slot_cached_w[idx] ||
-         slot_tex_h[idx] != slot_cached_h[idx])) {
+         slot_tex_w[idx] != w || slot_tex_h[idx] != h)) {
         pfn_DestroyTexture(slot_texture[idx]);
         slot_texture[idx] = NULL;
-        slot_texture_frame_id[idx] = UINT32_MAX;
     }
 
     if (!slot_texture[idx]) {
         slot_texture[idx] = pfn_CreateTexture(
             renderer, VR_SDL_PIXELFORMAT_ARGB8888,
-            VR_SDL_TEXTUREACCESS_STREAMING,
-            slot_cached_w[idx], slot_cached_h[idx]);
+            VR_SDL_TEXTUREACCESS_STREAMING, w, h);
         if (!slot_texture[idx]) return;
-        pfn_SetBlendMode(slot_texture[idx], VR_SDL_BLENDMODE_BLEND);
+        pfn_SetBlendMode(slot_texture[idx], VR_SDL_BLENDMODE_NONE);
         slot_tex_renderer[idx] = renderer;
-        slot_tex_w[idx] = slot_cached_w[idx];
-        slot_tex_h[idx] = slot_cached_h[idx];
-        slot_texture_frame_id[idx] = UINT32_MAX;
+        slot_tex_w[idx] = w;
+        slot_tex_h[idx] = h;
     }
 
-    if (slot_texture_frame_id[idx] != slot_cached_frame_id[idx]) {
+    /* Software compositing: blend pill pixels over the saved background
+       on the CPU and upload a fully opaque result.  This bypasses SDL's
+       texture alpha blending which doesn't work correctly on some embedded
+       framebuffer-backed renderers (black rectangle around pills). */
+    pixel_count = w * h;
+    if (slot_save_valid[idx] &&
+        slot_save_w[idx] == w && slot_save_h[idx] == h) {
+        const uint32_t *pill = slot_cached_pixels[idx];
+        const uint32_t *bg   = slot_save_pixels[idx];
+        for (int i = 0; i < pixel_count; i++) {
+            uint32_t src = pill[i];
+            uint32_t a = (src >> 24) & 0xFFu;
+            if (a == 0xFFu) {
+                slot_composited[i] = src;
+            } else if (a == 0) {
+                slot_composited[i] = bg[i] | 0xFF000000u;
+            } else {
+                uint32_t inv_a = 255u - a;
+                uint32_t sr = (src >> 16) & 0xFFu;
+                uint32_t sg = (src >> 8)  & 0xFFu;
+                uint32_t sb =  src        & 0xFFu;
+                uint32_t dr = (bg[i] >> 16) & 0xFFu;
+                uint32_t dg = (bg[i] >> 8)  & 0xFFu;
+                uint32_t db =  bg[i]        & 0xFFu;
+                uint32_t r = (sr * a + dr * inv_a + 127u) / 255u;
+                uint32_t g = (sg * a + dg * inv_a + 127u) / 255u;
+                uint32_t b = (sb * a + db * inv_a + 127u) / 255u;
+                slot_composited[i] = 0xFF000000u | (r << 16) | (g << 8) | b;
+            }
+        }
+        pfn_UpdateTexture(slot_texture[idx], NULL, slot_composited,
+                          w * (int)sizeof(uint32_t));
+    } else {
+        /* No saved background — fall back to raw pill pixels */
         pfn_UpdateTexture(slot_texture[idx], NULL, slot_cached_pixels[idx],
-                          slot_cached_w[idx] * (int)sizeof(uint32_t));
-        slot_texture_frame_id[idx] = slot_cached_frame_id[idx];
+                          w * (int)sizeof(uint32_t));
     }
 
     dst.x = slot_cached_x[idx];
     dst.y = slot_cached_y[idx];
-    dst.w = slot_cached_w[idx];
-    dst.h = slot_cached_h[idx];
+    dst.w = w;
+    dst.h = h;
     pfn_RenderCopy(renderer, slot_texture[idx], NULL, &dst);
 }
 
@@ -969,6 +1005,7 @@ static void save_slot_background(void *renderer, int idx) {
             renderer, VR_SDL_PIXELFORMAT_ARGB8888,
             VR_SDL_TEXTUREACCESS_STREAMING, rect.w, rect.h);
         if (!slot_save_texture[idx]) return;
+        pfn_SetBlendMode(slot_save_texture[idx], VR_SDL_BLENDMODE_NONE);
         slot_save_renderer[idx] = renderer;
     }
 
