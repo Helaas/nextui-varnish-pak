@@ -9,6 +9,7 @@
 #include "device.h"
 #include "hotkeys.h"
 #include "ipc.h"
+#include "manual.h"
 #include "overlay.h"
 #include "screenshot.h"
 #include "shm.h"
@@ -39,6 +40,7 @@ typedef struct {
 
 static slot_state_t slots[VARNISH_MAX_SLOTS];
 static volatile sig_atomic_t quit_flag;
+static varnish_manual_session manual_session;
 
 /* ── Warmup (delay publishing during early boot) ───────────────── */
 
@@ -218,6 +220,17 @@ static void handle_hotkey_action(varnish_hotkey_action action) {
     const char *filename;
     char message[320];
 
+    if (action == VARNISH_HOTKEY_ACTION_MANUAL) {
+        if (manual_start_for_active_game(&manual_session, message, sizeof(message)) != 0) {
+            if (message[0])
+                show_internal_pill(message, 3);
+            return;
+        }
+
+        hotkeys_runtime_set_paused(true);
+        return;
+    }
+
     if (action != VARNISH_HOTKEY_ACTION_SCREENSHOT)
         return;
 
@@ -339,6 +352,7 @@ int daemon_run(void) {
     warmup_start();
 
     memset(slots, 0, sizeof(slots));
+    manual_session_init(&manual_session);
 
     fprintf(stderr, "varnish: daemon started (pid %d, fb %dx%d)\n",
             (int)getpid(), fb_width, fb_height);
@@ -379,6 +393,8 @@ int daemon_run(void) {
         /* Expire timed-out slots */
         warmup_update();
         slot_expire_tick();
+        if (manual_session_poll(&manual_session))
+            hotkeys_runtime_set_paused(false);
         handle_hotkey_action(hotkeys_runtime_poll());
 
         /* ~50ms tick (20 Hz) */
@@ -388,6 +404,7 @@ int daemon_run(void) {
     /* ── Cleanup ───────────────────────────────────────────────── */
 
     fprintf(stderr, "varnish: daemon shutting down\n");
+    manual_session_abort(&manual_session);
     slot_clear_all();
     hotkeys_runtime_cleanup();
     overlay_cleanup();

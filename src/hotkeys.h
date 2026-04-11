@@ -31,17 +31,20 @@ typedef enum {
 
 typedef enum {
     VARNISH_HOTKEY_ACTION_NONE = 0,
-    VARNISH_HOTKEY_ACTION_SCREENSHOT
+    VARNISH_HOTKEY_ACTION_SCREENSHOT,
+    VARNISH_HOTKEY_ACTION_MANUAL
 } varnish_hotkey_action;
 
 typedef struct {
     uint32_t screenshot_mask;
+    uint32_t manual_mask;
 } varnish_hotkey_config;
 
 typedef struct {
     uint32_t screenshot_mask;
+    uint32_t manual_mask;
     bool paused;
-    bool screenshot_latched;
+    bool fired_this_cycle;
     bool wait_for_release;
 } varnish_hotkey_logic;
 
@@ -58,8 +61,12 @@ bool hotkeys_config_has_bindings(const varnish_hotkey_config *config);
 int hotkeys_load_config(varnish_hotkey_config *config);
 int hotkeys_save_config(const varnish_hotkey_config *config);
 
-void hotkeys_logic_init(varnish_hotkey_logic *logic, uint32_t screenshot_mask);
-void hotkeys_logic_set_binding(varnish_hotkey_logic *logic, uint32_t screenshot_mask);
+void hotkeys_logic_init(varnish_hotkey_logic *logic,
+                        uint32_t screenshot_mask,
+                        uint32_t manual_mask);
+void hotkeys_logic_set_binding(varnish_hotkey_logic *logic,
+                               uint32_t screenshot_mask,
+                               uint32_t manual_mask);
 void hotkeys_logic_set_paused(varnish_hotkey_logic *logic, bool paused);
 varnish_hotkey_action hotkeys_logic_update(varnish_hotkey_logic *logic,
                                            uint32_t pressed_mask);

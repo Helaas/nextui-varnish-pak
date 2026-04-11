@@ -20,6 +20,44 @@
 
 /* ── Path helpers ──────────────────────────────────────────────── */
 
+void device_get_sdcard_path(char *out, size_t size) {
+    const char *sd = getenv("SDCARD_PATH");
+
+    if (!out || size == 0)
+        return;
+
+    if (!sd || !sd[0]) {
+#ifndef PLATFORM_MAC
+        sd = "/mnt/SDCARD";
+#else
+        sd = "";
+#endif
+    }
+
+    str_copy_trunc(out, size, sd);
+}
+
+void device_get_platform_name(char *out, size_t size) {
+    const char *platform = getenv("PLATFORM");
+
+    if (!out || size == 0)
+        return;
+
+    if (!platform || !platform[0]) {
+#if defined(PLATFORM_TG5040)
+        platform = "tg5040";
+#elif defined(PLATFORM_TG5050)
+        platform = "tg5050";
+#elif defined(PLATFORM_MY355)
+        platform = "my355";
+#else
+        platform = "tg5040";
+#endif
+    }
+
+    str_copy_trunc(out, size, platform);
+}
+
 void device_get_userdata_path(char *out, size_t size) {
     const char *p = getenv("USERDATA_PATH");
     if (p) {
@@ -27,10 +65,11 @@ void device_get_userdata_path(char *out, size_t size) {
         return;
     }
 #ifndef PLATFORM_MAC
-    const char *sd = getenv("SDCARD_PATH");
-    if (!sd) sd = "/mnt/SDCARD";
-    const char *platform = getenv("PLATFORM");
-    if (!platform) platform = "tg5040";
+    char sd[MAX_PATH];
+    char platform[32];
+
+    device_get_sdcard_path(sd, sizeof(sd));
+    device_get_platform_name(platform, sizeof(platform));
     if (size > 0) {
         if (path_join(out, size, sd, ".userdata") != 0 ||
             path_join(out, size, out, platform) != 0) {
@@ -56,8 +95,9 @@ void device_get_shared_userdata_path(char *out, size_t size) {
         return;
     }
 #ifndef PLATFORM_MAC
-    const char *sd = getenv("SDCARD_PATH");
-    if (!sd) sd = "/mnt/SDCARD";
+    char sd[MAX_PATH];
+
+    device_get_sdcard_path(sd, sizeof(sd));
     if (size > 0) {
         if (path_join(out, size, sd, ".userdata") != 0 ||
             path_join(out, size, out, "shared") != 0) {
@@ -83,20 +123,11 @@ void device_get_system_bin_path(char *out, size_t size) {
         return;
     }
 #ifndef PLATFORM_MAC
-    const char *sd = getenv("SDCARD_PATH");
-    if (!sd || !sd[0]) sd = "/mnt/SDCARD";
-    const char *platform = getenv("PLATFORM");
-    if (!platform || !platform[0]) {
-#if defined(PLATFORM_TG5040)
-        platform = "tg5040";
-#elif defined(PLATFORM_TG5050)
-        platform = "tg5050";
-#elif defined(PLATFORM_MY355)
-        platform = "my355";
-#else
-        platform = "tg5040";
-#endif
-    }
+    char sd[MAX_PATH];
+    char platform[32];
+
+    device_get_sdcard_path(sd, sizeof(sd));
+    device_get_platform_name(platform, sizeof(platform));
     snprintf(out, size, "%s/.system/%s/bin", sd, platform);
 #else
     out[0] = '\0';
@@ -111,26 +142,19 @@ void device_get_pak_dir(char *out, size_t size) {
     }
 
 #ifndef PLATFORM_MAC
-    const char *sd = getenv("SDCARD_PATH");
-    if (!sd || !sd[0]) sd = "/mnt/SDCARD";
-    const char *platform = getenv("PLATFORM");
-    if (!platform || !platform[0]) {
-#if defined(PLATFORM_TG5040)
-        platform = "tg5040";
-#elif defined(PLATFORM_TG5050)
-        platform = "tg5050";
-#elif defined(PLATFORM_MY355)
-        platform = "my355";
-#else
-        platform = "tg5040";
-#endif
-    }
+    char sd[MAX_PATH];
+    char platform[32];
+
+    device_get_sdcard_path(sd, sizeof(sd));
+    device_get_platform_name(platform, sizeof(platform));
     snprintf(out, size, "%s/Tools/%s/Varnish.pak", sd, platform);
 #else
-    const char *sd = getenv("SDCARD_PATH");
-    const char *platform = getenv("PLATFORM");
+    char sd[MAX_PATH];
+    char platform[32];
 
-    if (!sd || !sd[0] || !platform || !platform[0]) {
+    device_get_sdcard_path(sd, sizeof(sd));
+    device_get_platform_name(platform, sizeof(platform));
+    if (!sd[0] || !platform[0]) {
         out[0] = '\0';
         return;
     }

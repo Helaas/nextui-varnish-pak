@@ -199,15 +199,26 @@ static void ui_run_hotkeys_menu(void) {
 
     for (;;) {
         char screenshot_text[64];
+        char manual_text[64];
         char help_text[192];
         ap_option screenshot_value[] = {
             { .label = screenshot_text, .value = screenshot_text },
+        };
+        ap_option manual_value[] = {
+            { .label = manual_text, .value = manual_text },
         };
         ap_options_item items[] = {
             {
                 .label = "Screenshot",
                 .type = AP_OPT_CLICKABLE,
                 .options = screenshot_value,
+                .option_count = 1,
+                .selected_option = 0,
+            },
+            {
+                .label = "Manual",
+                .type = AP_OPT_CLICKABLE,
+                .options = manual_value,
                 .option_count = 1,
                 .selected_option = 0,
             },
@@ -224,13 +235,15 @@ static void ui_run_hotkeys_menu(void) {
         int rc;
 
         ui_format_binding(draft.screenshot_mask, screenshot_text, sizeof(screenshot_text));
+        ui_format_binding(draft.manual_mask, manual_text, sizeof(manual_text));
         snprintf(help_text, sizeof(help_text),
-                 "Define global button chords.\n\nScreenshot: %s", screenshot_text);
+                 "Define global button chords.\n\nScreenshot: %s\nManual: %s",
+                 screenshot_text, manual_text);
 
         opts = (ap_options_list_opts) {
             .title = "Hotkeys",
             .items = items,
-            .item_count = 1,
+            .item_count = 2,
             .footer = footer,
             .footer_count = 4,
             .action_button = AP_BTN_X,
@@ -244,7 +257,10 @@ static void ui_run_hotkeys_menu(void) {
             return;
 
         if (result.action == AP_ACTION_TRIGGERED) {
-            draft.screenshot_mask = 0u;
+            if (result.focused_index == 0)
+                draft.screenshot_mask = 0u;
+            else if (result.focused_index == 1)
+                draft.manual_mask = 0u;
             continue;
         }
 
@@ -260,8 +276,12 @@ static void ui_run_hotkeys_menu(void) {
         }
 
         if (result.action == AP_ACTION_SELECTED) {
-            if (ui_capture_hotkey(&captured_mask) == AP_OK)
-                draft.screenshot_mask = captured_mask;
+            if (ui_capture_hotkey(&captured_mask) == AP_OK) {
+                if (result.focused_index == 0)
+                    draft.screenshot_mask = captured_mask;
+                else if (result.focused_index == 1)
+                    draft.manual_mask = captured_mask;
+            }
         }
     }
 }
@@ -278,14 +298,15 @@ int ui_run(const char *self_path) {
     for (;;) {
         varnish_status status;
         varnish_hotkey_config hotkey_config;
-        char hotkey_text[64];
-        char help_text[256];
+        char screenshot_text[64];
+        char manual_text[64];
+        char help_text[320];
         ap_option enabled_options[] = {
             { .label = "Off", .value = "0" },
             { .label = "On",  .value = "1" },
         };
         ap_option hotkey_value[] = {
-            { .label = hotkey_text, .value = hotkey_text },
+            { .label = screenshot_text, .value = screenshot_text },
         };
         ap_options_item items[] = {
             {
@@ -315,12 +336,16 @@ int ui_run(const char *self_path) {
 
         control_get_status(&status);
         hotkeys_load_config(&hotkey_config);
-        ui_format_binding(hotkey_config.screenshot_mask, hotkey_text, sizeof(hotkey_text));
+        ui_format_binding(hotkey_config.screenshot_mask,
+                          screenshot_text, sizeof(screenshot_text));
+        ui_format_binding(hotkey_config.manual_mask, manual_text, sizeof(manual_text));
 
         items[0].selected_option = want_enabled ? 1 : 0;
         control_format_status(&status, help_text, sizeof(help_text));
-        str_append(help_text, sizeof(help_text), "\nHotkey: ");
-        str_append(help_text, sizeof(help_text), hotkey_text);
+        str_append(help_text, sizeof(help_text), "\nScreenshot: ");
+        str_append(help_text, sizeof(help_text), screenshot_text);
+        str_append(help_text, sizeof(help_text), "\nManual: ");
+        str_append(help_text, sizeof(help_text), manual_text);
 
         opts = (ap_options_list_opts) {
             .title = "Varnish",

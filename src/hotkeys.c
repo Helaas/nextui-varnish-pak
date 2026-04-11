@@ -279,7 +279,8 @@ void hotkeys_config_init(varnish_hotkey_config *config) {
 }
 
 bool hotkeys_config_has_bindings(const varnish_hotkey_config *config) {
-    return config && config->screenshot_mask != 0u;
+    return config &&
+           (config->screenshot_mask != 0u || config->manual_mask != 0u);
 }
 
 int hotkeys_load_config(varnish_hotkey_config *config) {
@@ -329,6 +330,17 @@ int hotkeys_load_config(varnish_hotkey_config *config) {
             continue;
         }
 
+        if (strcmp(key, "manual") == 0) {
+            if (!value[0]) {
+                config->manual_mask = 0u;
+            } else if (hotkeys_parse_mask(value, &config->manual_mask) != 0) {
+                config->manual_mask = 0u;
+                hotkeys_log_parse_error("invalid manual binding; disabling it");
+                had_error = 1;
+            }
+            continue;
+        }
+
         hotkeys_log_parse_error("unknown config key; ignoring line");
         had_error = 1;
     }
@@ -341,6 +353,7 @@ int hotkeys_save_config(const varnish_hotkey_config *config) {
     char path[HOTKEYS_MAX_PATH];
     char state_dir[HOTKEYS_MAX_PATH];
     char screenshot[64];
+    char manual[64];
     FILE *f;
 
     if (!config)
@@ -349,6 +362,8 @@ int hotkeys_save_config(const varnish_hotkey_config *config) {
         hotkeys_get_config_path(path, sizeof(path)) != 0)
         return -1;
     if (hotkeys_format_mask(config->screenshot_mask, screenshot, sizeof(screenshot)) != 0)
+        return -1;
+    if (hotkeys_format_mask(config->manual_mask, manual, sizeof(manual)) != 0)
         return -1;
 
     hotkeys_mkdirp(state_dir);
@@ -359,28 +374,35 @@ int hotkeys_save_config(const varnish_hotkey_config *config) {
 
     fprintf(f, "# Varnish hotkeys\n");
     fprintf(f, "screenshot=%s\n", screenshot);
+    fprintf(f, "manual=%s\n", manual);
     fclose(f);
     return 0;
 }
 
-void hotkeys_logic_init(varnish_hotkey_logic *logic, uint32_t screenshot_mask) {
+void hotkeys_logic_init(varnish_hotkey_logic *logic,
+                        uint32_t screenshot_mask,
+                        uint32_t manual_mask) {
     if (!logic) return;
     memset(logic, 0, sizeof(*logic));
     logic->screenshot_mask = screenshot_mask;
+    logic->manual_mask = manual_mask;
     logic->wait_for_release = true;
 }
 
-void hotkeys_logic_set_binding(varnish_hotkey_logic *logic, uint32_t screenshot_mask) {
+void hotkeys_logic_set_binding(varnish_hotkey_logic *logic,
+                               uint32_t screenshot_mask,
+                               uint32_t manual_mask) {
     if (!logic) return;
     logic->screenshot_mask = screenshot_mask;
-    logic->screenshot_latched = false;
+    logic->manual_mask = manual_mask;
+    logic->fired_this_cycle = false;
     logic->wait_for_release = true;
 }
 
 void hotkeys_logic_set_paused(varnish_hotkey_logic *logic, bool paused) {
     if (!logic) return;
     logic->paused = paused;
-    logic->screenshot_latched = false;
+    logic->fired_this_cycle = false;
     logic->wait_for_release = true;
 }
 
@@ -390,7 +412,7 @@ varnish_hotkey_action hotkeys_logic_update(varnish_hotkey_logic *logic,
         return VARNISH_HOTKEY_ACTION_NONE;
 
     if (pressed_mask == 0u) {
-        logic->screenshot_latched = false;
+        logic->fired_this_cycle = false;
         logic->wait_for_release = false;
         return VARNISH_HOTKEY_ACTION_NONE;
     }
@@ -398,11 +420,18 @@ varnish_hotkey_action hotkeys_logic_update(varnish_hotkey_logic *logic,
     if (logic->paused || logic->wait_for_release)
         return VARNISH_HOTKEY_ACTION_NONE;
 
-    if (!logic->screenshot_latched &&
+    if (!logic->fired_this_cycle &&
         logic->screenshot_mask != 0u &&
         pressed_mask == logic->screenshot_mask) {
-        logic->screenshot_latched = true;
+        logic->fired_this_cycle = true;
         return VARNISH_HOTKEY_ACTION_SCREENSHOT;
+    }
+
+    if (!logic->fired_this_cycle &&
+        logic->manual_mask != 0u &&
+        pressed_mask == logic->manual_mask) {
+        logic->fired_this_cycle = true;
+        return VARNISH_HOTKEY_ACTION_MANUAL;
     }
 
     return VARNISH_HOTKEY_ACTION_NONE;
@@ -676,7 +705,9 @@ int hotkeys_runtime_init(void) {
     g_hotkeys.raw_input_fd = -1;
 #endif
     hotkeys_load_config(&g_hotkeys.config);
-    hotkeys_logic_init(&g_hotkeys.logic, g_hotkeys.config.screenshot_mask);
+    hotkeys_logic_init(&g_hotkeys.logic,
+                       g_hotkeys.config.screenshot_mask,
+                       g_hotkeys.config.manual_mask);
     g_hotkeys.initialized = true;
     return 0;
 }
@@ -706,7 +737,9 @@ int hotkeys_runtime_reload(void) {
         return -1;
 
     rc = hotkeys_load_config(&g_hotkeys.config);
-    hotkeys_logic_set_binding(&g_hotkeys.logic, g_hotkeys.config.screenshot_mask);
+    hotkeys_logic_set_binding(&g_hotkeys.logic,
+                              g_hotkeys.config.screenshot_mask,
+                              g_hotkeys.config.manual_mask);
     return rc;
 }
 

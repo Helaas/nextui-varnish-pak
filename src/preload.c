@@ -79,6 +79,7 @@ typedef char GLchar;
 #define VR_GL_ACTIVE_TEXTURE               0x84E0u
 #define VR_GL_BLEND_DST_RGB               0x80C8u
 #define VR_GL_BLEND_SRC_RGB               0x80C9u
+#define VR_GL_VERTEX_ARRAY_BINDING         0x85B5u
 #define VR_GL_VERTEX_ATTRIB_ARRAY_ENABLED  0x8622u
 
 /* ── SDL function pointers (resolved lazily via dlsym) ──────────── */
@@ -126,13 +127,15 @@ typedef void      (*fn_glBindBuffer)(GLenum, GLuint);
 typedef void      (*fn_glGenBuffers)(GLsizei, GLuint *);
 typedef void      (*fn_glDeleteBuffers)(GLsizei, const GLuint *);
 typedef void      (*fn_glBufferData)(GLenum, GLsizeiptr, const void *, GLenum);
+typedef void      (*fn_glBindVertexArray)(GLuint);
+typedef void      (*fn_glGenVertexArrays)(GLsizei, GLuint *);
+typedef void      (*fn_glDeleteVertexArrays)(GLsizei, const GLuint *);
 typedef void      (*fn_glEnableVertexAttribArray)(GLuint);
 typedef void      (*fn_glDisableVertexAttribArray)(GLuint);
 typedef void      (*fn_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *);
 typedef void      (*fn_glDrawArrays)(GLenum, GLint, GLsizei);
 typedef void      (*fn_glGetIntegerv)(GLenum, GLint *);
 typedef GLboolean (*fn_glIsEnabled)(GLenum);
-typedef void      (*fn_glGetVertexAttribiv)(GLuint, GLenum, GLint *);
 
 static fn_SDL_RenderPresent       real_present;
 static fn_SDL_GL_SwapWindow       real_gl_swap;
@@ -178,13 +181,15 @@ static fn_glBindBuffer                pfn_glBindBuffer;
 static fn_glGenBuffers                pfn_glGenBuffers;
 static fn_glDeleteBuffers             pfn_glDeleteBuffers;
 static fn_glBufferData                pfn_glBufferData;
+static fn_glBindVertexArray           pfn_glBindVertexArray;
+static fn_glGenVertexArrays           pfn_glGenVertexArrays;
+static fn_glDeleteVertexArrays        pfn_glDeleteVertexArrays;
 static fn_glEnableVertexAttribArray   pfn_glEnableVertexAttribArray;
 static fn_glDisableVertexAttribArray  pfn_glDisableVertexAttribArray;
 static fn_glVertexAttribPointer       pfn_glVertexAttribPointer;
 static fn_glDrawArrays                pfn_glDrawArrays;
 static fn_glGetIntegerv               pfn_glGetIntegerv;
 static fn_glIsEnabled                 pfn_glIsEnabled;
-static fn_glGetVertexAttribiv         pfn_glGetVertexAttribiv;
 static int gl_funcs_ok;
 
 /* ── Shared memory state (lazy init) ────────────────────────────── */
@@ -222,6 +227,7 @@ static uint8_t  gl_slot_rgba[VARNISH_MAX_SLOTS][VARNISH_SLOT_MAX_W * VARNISH_SLO
 static void    *gl_context;
 static GLuint   gl_program;
 static GLuint   gl_vbo;
+static GLuint   gl_vao;
 static GLint    gl_attr_position = -1;
 static GLint    gl_attr_texcoord = -1;
 static GLint    gl_uniform_texture = -1;
@@ -323,6 +329,17 @@ static void init_gl_funcs(void) {
     pfn_glGenBuffers = (fn_glGenBuffers)resolve_gl_symbol("glGenBuffers");
     pfn_glDeleteBuffers = (fn_glDeleteBuffers)resolve_gl_symbol("glDeleteBuffers");
     pfn_glBufferData = (fn_glBufferData)resolve_gl_symbol("glBufferData");
+    pfn_glBindVertexArray = (fn_glBindVertexArray)resolve_gl_symbol("glBindVertexArray");
+    if (!pfn_glBindVertexArray)
+        pfn_glBindVertexArray = (fn_glBindVertexArray)resolve_gl_symbol("glBindVertexArrayOES");
+    pfn_glGenVertexArrays = (fn_glGenVertexArrays)resolve_gl_symbol("glGenVertexArrays");
+    if (!pfn_glGenVertexArrays)
+        pfn_glGenVertexArrays = (fn_glGenVertexArrays)resolve_gl_symbol("glGenVertexArraysOES");
+    pfn_glDeleteVertexArrays =
+        (fn_glDeleteVertexArrays)resolve_gl_symbol("glDeleteVertexArrays");
+    if (!pfn_glDeleteVertexArrays)
+        pfn_glDeleteVertexArrays =
+            (fn_glDeleteVertexArrays)resolve_gl_symbol("glDeleteVertexArraysOES");
     pfn_glEnableVertexAttribArray =
         (fn_glEnableVertexAttribArray)resolve_gl_symbol("glEnableVertexAttribArray");
     pfn_glDisableVertexAttribArray =
@@ -332,8 +349,6 @@ static void init_gl_funcs(void) {
     pfn_glDrawArrays = (fn_glDrawArrays)resolve_gl_symbol("glDrawArrays");
     pfn_glGetIntegerv = (fn_glGetIntegerv)resolve_gl_symbol("glGetIntegerv");
     pfn_glIsEnabled = (fn_glIsEnabled)resolve_gl_symbol("glIsEnabled");
-    pfn_glGetVertexAttribiv =
-        (fn_glGetVertexAttribiv)resolve_gl_symbol("glGetVertexAttribiv");
 
     gl_funcs_ok = pfn_glCreateShader && pfn_glShaderSource && pfn_glCompileShader &&
                   pfn_glGetShaderiv && pfn_glDeleteShader && pfn_glCreateProgram &&
@@ -344,16 +359,17 @@ static void init_gl_funcs(void) {
                   pfn_glTexImage2D && pfn_glTexSubImage2D && pfn_glActiveTexture &&
                   pfn_glEnable && pfn_glDisable && pfn_glBlendFunc && pfn_glViewport &&
                   pfn_glBindBuffer && pfn_glGenBuffers && pfn_glDeleteBuffers &&
-                  pfn_glBufferData && pfn_glEnableVertexAttribArray &&
+                  pfn_glBufferData && pfn_glBindVertexArray && pfn_glGenVertexArrays &&
+                  pfn_glDeleteVertexArrays && pfn_glEnableVertexAttribArray &&
                   pfn_glDisableVertexAttribArray && pfn_glVertexAttribPointer &&
-                  pfn_glDrawArrays && pfn_glGetIntegerv && pfn_glIsEnabled &&
-                  pfn_glGetVertexAttribiv;
+                  pfn_glDrawArrays && pfn_glGetIntegerv && pfn_glIsEnabled;
 }
 
 static void gl_reset_resources(void) {
     gl_context = NULL;
     gl_program = 0;
     gl_vbo = 0;
+    gl_vao = 0;
     gl_attr_position = -1;
     gl_attr_texcoord = -1;
     gl_uniform_texture = -1;
@@ -564,13 +580,12 @@ static int collect_active_slots(int *order) {
 typedef struct {
     GLint current_program;
     GLint array_buffer;
+    GLint vertex_array_binding;
     GLint active_texture;
     GLint texture_binding_2d;
     GLint viewport[4];
     GLint blend_src_rgb;
     GLint blend_dst_rgb;
-    GLint attr_position_enabled;
-    GLint attr_texcoord_enabled;
     GLboolean blend_enabled;
     GLboolean depth_test_enabled;
     GLboolean cull_face_enabled;
@@ -671,6 +686,14 @@ static int ensure_gl_program(void) {
         return 0;
     }
 
+    pfn_glGenVertexArrays(1, &gl_vao);
+    if (!gl_vao) {
+        pfn_glDeleteBuffers(1, &gl_vbo);
+        gl_vbo = 0;
+        pfn_glDeleteProgram(program);
+        return 0;
+    }
+
     gl_program = program;
     gl_program_ready = 1;
     return 1;
@@ -692,6 +715,7 @@ static int ensure_gl_context_state(void) {
         gl_context = current_context;
         gl_program = 0;
         gl_vbo = 0;
+        gl_vao = 0;
         gl_attr_position = -1;
         gl_attr_texcoord = -1;
         gl_uniform_texture = -1;
@@ -714,6 +738,7 @@ static void gl_save_state(gl_saved_state_t *state) {
     memset(state, 0, sizeof(*state));
     pfn_glGetIntegerv(VR_GL_CURRENT_PROGRAM, &state->current_program);
     pfn_glGetIntegerv(VR_GL_ARRAY_BUFFER_BINDING, &state->array_buffer);
+    pfn_glGetIntegerv(VR_GL_VERTEX_ARRAY_BINDING, &state->vertex_array_binding);
     pfn_glGetIntegerv(VR_GL_ACTIVE_TEXTURE, &state->active_texture);
     pfn_glActiveTexture(VR_GL_TEXTURE0);
     pfn_glGetIntegerv(VR_GL_TEXTURE_BINDING_2D, &state->texture_binding_2d);
@@ -724,12 +749,6 @@ static void gl_save_state(gl_saved_state_t *state) {
     state->depth_test_enabled = pfn_glIsEnabled(VR_GL_DEPTH_TEST);
     state->cull_face_enabled = pfn_glIsEnabled(VR_GL_CULL_FACE);
     state->scissor_test_enabled = pfn_glIsEnabled(VR_GL_SCISSOR_TEST);
-    pfn_glGetVertexAttribiv((GLuint)gl_attr_position,
-                            VR_GL_VERTEX_ATTRIB_ARRAY_ENABLED,
-                            &state->attr_position_enabled);
-    pfn_glGetVertexAttribiv((GLuint)gl_attr_texcoord,
-                            VR_GL_VERTEX_ATTRIB_ARRAY_ENABLED,
-                            &state->attr_texcoord_enabled);
 }
 
 static void gl_restore_state(const gl_saved_state_t *state) {
@@ -737,15 +756,8 @@ static void gl_restore_state(const gl_saved_state_t *state) {
         return;
 
     pfn_glUseProgram((GLuint)state->current_program);
+    pfn_glBindVertexArray((GLuint)state->vertex_array_binding);
     pfn_glBindBuffer(VR_GL_ARRAY_BUFFER, (GLuint)state->array_buffer);
-    if (state->attr_position_enabled)
-        pfn_glEnableVertexAttribArray((GLuint)gl_attr_position);
-    else
-        pfn_glDisableVertexAttribArray((GLuint)gl_attr_position);
-    if (state->attr_texcoord_enabled)
-        pfn_glEnableVertexAttribArray((GLuint)gl_attr_texcoord);
-    else
-        pfn_glDisableVertexAttribArray((GLuint)gl_attr_texcoord);
     if (state->blend_enabled)
         pfn_glEnable(VR_GL_BLEND);
     else
@@ -860,6 +872,7 @@ static int draw_all_gl_overlays(void *window) {
     pfn_glUseProgram(gl_program);
     pfn_glActiveTexture(VR_GL_TEXTURE0);
     pfn_glUniform1i(gl_uniform_texture, 0);
+    pfn_glBindVertexArray(gl_vao);
     pfn_glBindBuffer(VR_GL_ARRAY_BUFFER, gl_vbo);
     pfn_glEnableVertexAttribArray((GLuint)gl_attr_position);
     pfn_glEnableVertexAttribArray((GLuint)gl_attr_texcoord);

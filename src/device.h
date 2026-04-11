@@ -7,6 +7,8 @@
 
 #include <stddef.h>
 
+void device_get_sdcard_path(char *out, size_t size);
+void device_get_platform_name(char *out, size_t size);
 void device_get_userdata_path(char *out, size_t size);
 void device_get_shared_userdata_path(char *out, size_t size);
 void device_get_system_bin_path(char *out, size_t size);
