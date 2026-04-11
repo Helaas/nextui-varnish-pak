@@ -26,6 +26,8 @@ typedef enum {
     VARNISH_HOTKEY_BUTTON_START,
     VARNISH_HOTKEY_BUTTON_SELECT,
     VARNISH_HOTKEY_BUTTON_MENU,
+    VARNISH_HOTKEY_BUTTON_F1,
+    VARNISH_HOTKEY_BUTTON_F2,
     VARNISH_HOTKEY_BUTTON_COUNT
 } varnish_hotkey_button;
 
@@ -75,6 +77,7 @@ int hotkeys_runtime_init(void);
 void hotkeys_runtime_cleanup(void);
 int hotkeys_runtime_reload(void);
 void hotkeys_runtime_set_paused(bool paused);
+uint32_t hotkeys_runtime_pressed_mask(void);
 varnish_hotkey_action hotkeys_runtime_poll(void);
 
 #endif /* VARNISH_HOTKEYS_H */

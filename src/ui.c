@@ -47,6 +47,23 @@ static bool show_confirm(const char *message, const char *confirm_label) {
     return rc == AP_OK && result.confirmed;
 }
 
+static bool show_enable_reboot_prompt(void) {
+    ap_selection_option options[] = {
+        { .label = "Later", .value = "later" },
+        { .label = "Reboot now", .value = "reboot" },
+    };
+    ap_footer_item footer[] = {
+        { .button = AP_BTN_B, .label = "Later" },
+        { .button = AP_BTN_LEFT, .label = "Change", .button_text = "\xE2\x86\x90/\xE2\x86\x92" },
+        { .button = AP_BTN_A, .label = "Choose", .is_confirm = true },
+    };
+    ap_selection_result result = {0};
+    int rc = ap_selection("Varnish enabled.\n\nReboot now to inject LD_PRELOAD into the current launcher session.",
+                          options, 2, footer, 3, &result);
+
+    return rc == AP_OK && result.selected_index == 1;
+}
+
 static void show_state_error(const char *prefix, const varnish_status *status) {
     char state[160];
     char message[320];
@@ -95,9 +112,12 @@ static void ui_resume_hotkeys(bool paused) {
 }
 
 static int ui_capture_hotkey(uint32_t *out_mask) {
+    uint32_t ap_mask = 0u;
     uint32_t current_mask = 0u;
     uint32_t candidate_mask = 0u;
+    uint32_t b_bit = hotkeys_button_bit(VARNISH_HOTKEY_BUTTON_B);
     bool pending_cancel_b = false;
+    bool runtime_ready = false;
     char current_text[64];
     char status_text[128];
     ap_footer_item footer[] = {
@@ -107,13 +127,21 @@ static int ui_capture_hotkey(uint32_t *out_mask) {
     if (!out_mask)
         return AP_CANCELLED;
 
-    for (;;) {
-        ap_input_event ev;
+    runtime_ready = (hotkeys_runtime_init() == 0);
+    if (runtime_ready)
+        current_mask = hotkeys_runtime_pressed_mask();
 
-        while (ap_poll_input(&ev)) {
+    for (;;) {
+        uint32_t pressed_mask;
+        uint32_t newly_pressed;
+
+        while (1) {
+            ap_input_event ev;
             varnish_hotkey_button hotkey_button;
             uint32_t bit;
 
+            if (!ap_poll_input(&ev))
+                break;
             if (ev.repeated)
                 continue;
 
@@ -121,39 +149,46 @@ static int ui_capture_hotkey(uint32_t *out_mask) {
             bit = hotkeys_button_bit(hotkey_button);
 
             if (ev.pressed) {
-                if (ev.button == AP_BTN_B && current_mask == 0u && candidate_mask == 0u)
-                    pending_cancel_b = true;
-
-                if (bit) {
-                    current_mask |= bit;
-                    candidate_mask |= bit;
-                    if (hotkey_button != VARNISH_HOTKEY_BUTTON_B)
-                        pending_cancel_b = false;
-                }
-            } else {
-                if (bit)
-                    current_mask &= ~bit;
-
-                if (pending_cancel_b &&
-                    hotkey_button == VARNISH_HOTKEY_BUTTON_B &&
-                    current_mask == 0u &&
-                    candidate_mask == hotkeys_button_bit(VARNISH_HOTKEY_BUTTON_B)) {
-                    return AP_CANCELLED;
-                }
-
-                if (current_mask == 0u && candidate_mask != 0u) {
-                    int count = hotkeys_mask_button_count(candidate_mask);
-
-                    pending_cancel_b = false;
-                    if (count >= 2 && count <= 4) {
-                        *out_mask = candidate_mask;
-                        return AP_OK;
-                    }
-
-                    candidate_mask = 0u;
-                }
+                ap_mask |= bit;
+            } else if (bit) {
+                ap_mask &= ~bit;
             }
         }
+
+        pressed_mask = ap_mask;
+        if (runtime_ready)
+            pressed_mask |= hotkeys_runtime_pressed_mask();
+
+        newly_pressed = pressed_mask & ~current_mask;
+        if (newly_pressed != 0u) {
+            if (current_mask == 0u && candidate_mask == 0u && newly_pressed == b_bit)
+                pending_cancel_b = true;
+
+            candidate_mask |= newly_pressed;
+            if ((newly_pressed & ~b_bit) != 0u)
+                pending_cancel_b = false;
+        }
+
+        if (pressed_mask == 0u && current_mask != 0u && candidate_mask != 0u) {
+            int count = hotkeys_mask_button_count(candidate_mask);
+
+            if (pending_cancel_b && candidate_mask == b_bit) {
+                if (runtime_ready)
+                    hotkeys_runtime_cleanup();
+                return AP_CANCELLED;
+            }
+
+            pending_cancel_b = false;
+            if (count >= 2 && count <= 4) {
+                *out_mask = candidate_mask;
+                if (runtime_ready)
+                    hotkeys_runtime_cleanup();
+                return AP_OK;
+            }
+
+            candidate_mask = 0u;
+        }
+        current_mask = pressed_mask;
 
         ui_format_binding(candidate_mask, current_text, sizeof(current_text));
         if (candidate_mask == 0u) {
@@ -188,6 +223,7 @@ static int ui_capture_hotkey(uint32_t *out_mask) {
             ap_draw_text(value_font, current_text, content.x + pad, text_y, theme->accent);
         }
         ap_draw_footer(footer, 1);
+        ap_request_frame_in(16);
         ap_present();
     }
 }
@@ -389,7 +425,8 @@ int ui_run(const char *self_path) {
             show_state_error("Could not fully enable Varnish.", &status);
         } else {
             ui_pause_hotkeys(&hotkeys_paused);
-            show_message("Varnish enabled.\n\nReboot to inject LD_PRELOAD into the current launcher session.");
+            if (show_enable_reboot_prompt() && control_request_reboot() != 0)
+                show_error("Could not request reboot.");
         }
     }
 

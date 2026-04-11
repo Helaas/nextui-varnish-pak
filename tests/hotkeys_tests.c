@@ -108,6 +108,13 @@ static void test_parse_and_format(void) {
     CHECK(strcmp(formatted, "L2+START+MENU") == 0,
           "format should keep canonical order");
 
+    CHECK(hotkeys_parse_mask("f2 + f1", &mask) == 0,
+          "parse should accept function buttons");
+    CHECK(hotkeys_format_mask(mask, formatted, sizeof(formatted)) == 0,
+          "format mask failed for function button chord");
+    CHECK(strcmp(formatted, "F1+F2") == 0,
+          "format should keep function buttons in canonical order");
+
     CHECK(hotkeys_parse_mask("POWER+L1", &mask) != 0,
           "parse should reject unsupported buttons");
     CHECK(hotkeys_parse_mask("A", &mask) != 0,

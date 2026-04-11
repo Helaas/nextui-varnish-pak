@@ -37,6 +37,9 @@ typedef struct {
     SDL_Joystick *joysticks[HOTKEYS_TRIMUI_MAX_JOYSTICKS];
     int joystick_count;
     bool joystick_ready;
+    bool joystick_subsystem_owned;
+    bool joystick_event_state_saved;
+    int joystick_event_state;
 #endif
 #if defined(PLATFORM_MY355) && defined(__linux__)
     int raw_input_fd;
@@ -67,6 +70,8 @@ static const varnish_hotkey_button hotkey_button_order[] = {
     VARNISH_HOTKEY_BUTTON_START,
     VARNISH_HOTKEY_BUTTON_SELECT,
     VARNISH_HOTKEY_BUTTON_MENU,
+    VARNISH_HOTKEY_BUTTON_F1,
+    VARNISH_HOTKEY_BUTTON_F2,
 };
 
 static const char *hotkey_button_names[VARNISH_HOTKEY_BUTTON_COUNT] = {
@@ -86,6 +91,8 @@ static const char *hotkey_button_names[VARNISH_HOTKEY_BUTTON_COUNT] = {
     "START",
     "SELECT",
     "MENU",
+    "F1",
+    "F2",
 };
 
 static void hotkeys_log_parse_error(const char *detail) {
@@ -450,16 +457,22 @@ static void hotkeys_trimui_close_joysticks(void) {
 
 static int hotkeys_trimui_open_joysticks(void) {
     int count;
+    bool had_joystick_subsystem = SDL_WasInit(SDL_INIT_JOYSTICK) != 0;
 
     hotkeys_trimui_close_joysticks();
 
-    if (!SDL_WasInit(SDL_INIT_JOYSTICK) &&
-        SDL_InitSubSystem(SDL_INIT_JOYSTICK) < 0) {
+    if (!had_joystick_subsystem && SDL_InitSubSystem(SDL_INIT_JOYSTICK) < 0) {
         fprintf(stderr, "varnish: hotkeys: SDL joystick init failed: %s\n",
                 SDL_GetError());
         return -1;
     }
+    if (!had_joystick_subsystem)
+        g_hotkeys.joystick_subsystem_owned = true;
 
+    if (!g_hotkeys.joystick_event_state_saved) {
+        g_hotkeys.joystick_event_state = SDL_JoystickEventState(SDL_QUERY);
+        g_hotkeys.joystick_event_state_saved = true;
+    }
     SDL_JoystickEventState(SDL_DISABLE);
     count = SDL_NumJoysticks();
     for (int i = 0; i < count && g_hotkeys.joystick_count < HOTKEYS_TRIMUI_MAX_JOYSTICKS; i++) {
@@ -519,7 +532,9 @@ static uint32_t hotkeys_trimui_pressed_mask(void) {
                                   SDL_JoystickGetButton(joy, 7) != 0);
         hotkeys_trimui_set_button(&mask, VARNISH_HOTKEY_BUTTON_MENU,
                                   SDL_JoystickGetButton(joy, 8) != 0);
-        hotkeys_trimui_set_button(&mask, VARNISH_HOTKEY_BUTTON_L2,
+        hotkeys_trimui_set_button(&mask, VARNISH_HOTKEY_BUTTON_F1,
+                                  SDL_JoystickGetButton(joy, 9) != 0);
+        hotkeys_trimui_set_button(&mask, VARNISH_HOTKEY_BUTTON_F2,
                                   SDL_JoystickGetButton(joy, 10) != 0);
         hotkeys_trimui_set_button(&mask, VARNISH_HOTKEY_BUTTON_R2,
                                   SDL_JoystickGetButton(joy, 11) != 0);
@@ -720,7 +735,11 @@ void hotkeys_runtime_cleanup(void) {
 
 #if defined(PLATFORM_TG5040) || defined(PLATFORM_TG5050)
     hotkeys_trimui_close_joysticks();
-    if (SDL_WasInit(SDL_INIT_JOYSTICK))
+    if (g_hotkeys.joystick_event_state_saved) {
+        SDL_JoystickEventState(g_hotkeys.joystick_event_state);
+        g_hotkeys.joystick_event_state_saved = false;
+    }
+    if (g_hotkeys.joystick_subsystem_owned && SDL_WasInit(SDL_INIT_JOYSTICK))
         SDL_QuitSubSystem(SDL_INIT_JOYSTICK);
 #endif
 #if defined(PLATFORM_MY355) && defined(__linux__)
@@ -751,12 +770,14 @@ void hotkeys_runtime_set_paused(bool paused) {
     hotkeys_logic_set_paused(&g_hotkeys.logic, paused);
 }
 
-varnish_hotkey_action hotkeys_runtime_poll(void) {
-    uint32_t pressed_mask;
+uint32_t hotkeys_runtime_pressed_mask(void) {
+    if (!g_hotkeys.initialized)
+        return 0u;
+    return hotkeys_backend_pressed_mask();
+}
 
+varnish_hotkey_action hotkeys_runtime_poll(void) {
     if (!g_hotkeys.initialized)
         return VARNISH_HOTKEY_ACTION_NONE;
-
-    pressed_mask = hotkeys_backend_pressed_mask();
-    return hotkeys_logic_update(&g_hotkeys.logic, pressed_mask);
+    return hotkeys_logic_update(&g_hotkeys.logic, hotkeys_runtime_pressed_mask());
 }

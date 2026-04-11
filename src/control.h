@@ -20,5 +20,6 @@ bool control_is_enabled(const varnish_status *status);
 void control_format_status(const varnish_status *status, char *out, size_t size);
 int  control_enable(const char *self_path, varnish_status *out_status);
 int  control_disable(varnish_status *out_status);
+int  control_request_reboot(void);
 
 #endif /* VARNISH_CONTROL_H */

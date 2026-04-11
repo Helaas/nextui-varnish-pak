@@ -8,8 +8,10 @@
 #include "hooks.h"
 #include "ipc.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <signal.h>
 #include <unistd.h>
 
 #define CONTROL_POLL_MS            50
@@ -139,4 +141,20 @@ int control_disable(varnish_status *out_status) {
     }
 
     return err ? -1 : 0;
+}
+
+int control_request_reboot(void) {
+    int fd = open("/tmp/reboot", O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+
+    if (fd < 0)
+        return -1;
+    close(fd);
+    sync();
+
+    if (kill(getpid(), SIGTERM) != 0) {
+        unlink("/tmp/reboot");
+        return -1;
+    }
+
+    _exit(0);
 }
