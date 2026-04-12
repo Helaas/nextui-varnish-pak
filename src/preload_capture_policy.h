@@ -28,4 +28,11 @@ static inline int varnish_should_capture_background(
     return (uint32_t)(now_ms - last_capture_ms) >= min_capture_ms;
 }
 
+static inline int varnish_retry_deadline_reached(uint32_t now_ms,
+                                                 uint32_t retry_after_ms)
+{
+    return retry_after_ms == 0 ||
+           (int32_t)(now_ms - retry_after_ms) >= 0;
+}
+
 #endif

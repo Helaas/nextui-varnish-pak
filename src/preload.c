@@ -37,6 +37,7 @@
 #define VR_SDL_TEXTUREACCESS_STREAMING  1
 #define VR_SDL_BLENDMODE_BLEND          1
 #define VARNISH_SDL_BG_CAPTURE_MIN_MS   48u
+#define VARNISH_SHM_RETRY_MIN_MS        1000u
 
 /* ── Minimal GL declarations (resolved at runtime) ─────────────── */
 
@@ -200,6 +201,7 @@ static int gl_funcs_ok;
 static varnish_shm_t *shm;
 static int shm_fd = -1;
 static int shm_ok;
+static uint32_t shm_retry_after_ms;
 
 /* ── Per-slot cached overlay state ──────────────────────────────── */
 
@@ -447,6 +449,20 @@ static void init_shm(void) {
     gl_reset_resources();
 
     shm_ok = 1;
+    shm_retry_after_ms = 0;
+}
+
+static int ensure_shm_ready(uint32_t now_ms) {
+    if (shm_ok)
+        return 1;
+
+    if (!varnish_retry_deadline_reached(now_ms, shm_retry_after_ms))
+        return 0;
+
+    init_shm();
+    if (!shm_ok)
+        shm_retry_after_ms = now_ms + VARNISH_SHM_RETRY_MIN_MS;
+    return shm_ok;
 }
 
 /* ── Per-slot seqlock read helpers ──────────────────────────────── */
@@ -590,12 +606,10 @@ static void draw_slot(void *renderer, int idx) {
 static int collect_active_slots(int *order) {
     int count = 0;
     int i, j;
+    uint32_t now_ms;
 
-    if (!shm || !shm_ok) {
-        if (shm_fd >= 0) return 0;
-        init_shm();
-        if (!shm_ok) return 0;
-    }
+    now_ms = monotonic_now_ms();
+    if (!ensure_shm_ready(now_ms)) return 0;
 
     for (i = 0; i < VARNISH_MAX_SLOTS; i++) {
         slot_refresh_cache(i);
@@ -1137,17 +1151,15 @@ static void restore_full_frame(void *renderer) {
 static void maybe_force_idle_present(void) {
     int i;
     int need_present = 0;
+    uint32_t now_ms;
 
     if (force_present_guard) return;
     if (!last_renderer || render_tid < 0) return;
     if (!real_present) return;
     if (current_tid() != render_tid) return;
 
-    if (!shm || !shm_ok) {
-        if (shm_fd >= 0) return;
-        init_shm();
-        if (!shm_ok) return;
-    }
+    now_ms = monotonic_now_ms();
+    if (!ensure_shm_ready(now_ms)) return;
 
     /* Check if any slot has a new frame we haven't presented yet */
     for (i = 0; i < VARNISH_MAX_SLOTS; i++) {
