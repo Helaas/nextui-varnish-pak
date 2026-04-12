@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int stub_daemon_running;
@@ -94,6 +95,73 @@ static char *capture_startup_env(void) {
     return buf;
 }
 
+static char *run_shell_script(const char *script_path) {
+    int pipefd[2];
+    pid_t pid;
+    char chunk[256];
+    size_t total = 0;
+    size_t capacity = 256;
+    char *output;
+    ssize_t nread;
+    int status;
+
+    CHECK(pipe(pipefd) == 0, "pipe failed");
+
+    pid = fork();
+    CHECK(pid >= 0, "fork failed");
+    if (pid == 0) {
+        close(pipefd[0]);
+        CHECK(dup2(pipefd[1], STDOUT_FILENO) >= 0, "dup2 failed");
+        close(pipefd[1]);
+        execl("/bin/sh", "sh", script_path, (char *)NULL);
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+    output = (char *)malloc(capacity);
+    CHECK(output != NULL, "could not allocate script output buffer");
+
+    while ((nread = read(pipefd[0], chunk, sizeof(chunk))) > 0) {
+        if (total + (size_t)nread + 1 > capacity) {
+            char *grown;
+            capacity = (total + (size_t)nread + 1) * 2;
+            grown = (char *)realloc(output, capacity);
+            CHECK(grown != NULL, "could not grow script output buffer");
+            output = grown;
+        }
+        memcpy(output + total, chunk, (size_t)nread);
+        total += (size_t)nread;
+    }
+
+    CHECK(nread == 0, "script output read failed");
+    close(pipefd[0]);
+    CHECK(waitpid(pid, &status, 0) == pid, "waitpid failed");
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "shell evaluation should succeed");
+
+    output[total] = '\0';
+    return output;
+}
+
+static char *evaluate_startup_env_script(const char *root, const char *env_text) {
+    char script_path[PATH_MAX];
+    FILE *f;
+
+    snprintf(script_path, sizeof(script_path), "%s/eval-startup-env.sh", root);
+    f = fopen(script_path, "wb");
+    CHECK(f != NULL, "could not open startup env script");
+    CHECK(fputs("#!/bin/sh\n", f) >= 0, "could not write startup env shebang");
+    CHECK(fputs("LD_PRELOAD='/existing/preload.so'\n", f) >= 0,
+          "could not seed LD_PRELOAD");
+    CHECK(fputs(env_text, f) >= 0, "could not write startup env body");
+    CHECK(fputs("printf '%s' \"$LD_PRELOAD\"\n", f) >= 0,
+          "could not write startup env probe");
+    fclose(f);
+    CHECK(chmod(script_path, 0755) == 0, "could not chmod startup env script");
+
+    return run_shell_script(script_path);
+}
+
 static int count_substring(const char *haystack, const char *needle) {
     int count = 0;
     const char *p = haystack;
@@ -118,16 +186,17 @@ static void write_stub_overlay(const char *pak_dir) {
     fclose(f);
 }
 
-static void configure_platform_env(const char *root, const char *platform,
-                                   char *startup_path, size_t startup_size,
-                                   char *boot_path, size_t boot_size) {
+static void configure_platform_env_named(const char *root, const char *platform,
+                                         const char *pak_dir_name,
+                                         char *startup_path, size_t startup_size,
+                                         char *boot_path, size_t boot_size,
+                                         char *pak_dir, size_t pak_dir_size) {
     char sdcard[PATH_MAX];
     char userdata[PATH_MAX];
-    char pak_dir[PATH_MAX];
 
     snprintf(sdcard, sizeof(sdcard), "%s/sdcard", root);
     snprintf(userdata, sizeof(userdata), "%s/userdata/%s", root, platform);
-    snprintf(pak_dir, sizeof(pak_dir), "%s/Tools/%s/Varnish.pak", sdcard, platform);
+    snprintf(pak_dir, pak_dir_size, "%s/Tools/%s/%s", sdcard, platform, pak_dir_name);
     snprintf(startup_path, startup_size, "%s/.tmp_update/%s.sh", sdcard, platform);
     snprintf(boot_path, boot_size, "%s/.hooks/boot.d/varnish.sync.sh", userdata);
 
@@ -138,6 +207,17 @@ static void configure_platform_env(const char *root, const char *platform,
     CHECK(setenv("USERDATA_PATH", userdata, 1) == 0, "setenv USERDATA_PATH failed");
     CHECK(setenv("PLATFORM", platform, 1) == 0, "setenv PLATFORM failed");
     CHECK(setenv("PAK_DIR", pak_dir, 1) == 0, "setenv PAK_DIR failed");
+}
+
+static void configure_platform_env(const char *root, const char *platform,
+                                   char *startup_path, size_t startup_size,
+                                   char *boot_path, size_t boot_size) {
+    char pak_dir[PATH_MAX];
+
+    configure_platform_env_named(root, platform, "Varnish.pak",
+                                 startup_path, startup_size,
+                                 boot_path, boot_size,
+                                 pak_dir, sizeof(pak_dir));
 }
 
 static void run_platform_case(const char *root, const char *platform) {
@@ -233,6 +313,35 @@ static void run_platform_case(const char *root, const char *platform) {
     CHECK(stub_spawn_calls == 0, "disabled boot check should not spawn daemon");
 }
 
+static void test_startup_env_shell_escaping(const char *root) {
+    char startup_path[PATH_MAX];
+    char boot_path[PATH_MAX];
+    char pak_dir[PATH_MAX];
+    char expected[PATH_MAX + 64];
+    char *env_text;
+    char *evaluated;
+
+    configure_platform_env_named(root, "tg5040", "Varnish '$HOME test.pak",
+                                 startup_path, sizeof(startup_path),
+                                 boot_path, sizeof(boot_path),
+                                 pak_dir, sizeof(pak_dir));
+
+    CHECK(hooks_set_enabled(true) == 0, "enable marker for escape test failed");
+    CHECK(hooks_uninstall_startup() == 0, "startup uninstall for escape test failed");
+    CHECK(hooks_uninstall_boot() == 0, "boot uninstall for escape test failed");
+
+    env_text = capture_startup_env();
+    evaluated = evaluate_startup_env_script(root, env_text);
+    snprintf(expected, sizeof(expected), "%s/varnish_overlay.so:/existing/preload.so", pak_dir);
+
+    CHECK(strcmp(evaluated, expected) == 0,
+          "startup env should preserve literal overlay path contents");
+
+    free(env_text);
+    free(evaluated);
+    CHECK(hooks_set_enabled(false) == 0, "disable marker for escape test failed");
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: %s <tmp-root>\n", argv[0]);
@@ -241,6 +350,7 @@ int main(int argc, char **argv) {
 
     run_platform_case(argv[1], "tg5040");
     run_platform_case(argv[1], "tg5050");
+    test_startup_env_shell_escaping(argv[1]);
 
     puts("hooks_tests: ok");
     return 0;

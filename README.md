@@ -21,7 +21,7 @@ Up to 8 overlay slots can be active simultaneously — one per client Pak.
 
 ### Shell (simplest)
 
-Write a single line to the FIFO:
+If you already know the daemon is running, you can write a single line to the FIFO:
 
 ```sh
 echo "PILL mypak bottom-center 5 Scraping artwork..." > /tmp/varnish.fifo
@@ -33,7 +33,8 @@ To hide it before it expires:
 echo "HIDE mypak" > /tmp/varnish.fifo
 ```
 
-Or source the helper script bundled with Varnish:
+For normal Pak integration, source the helper script bundled with Varnish. It prefers the
+bundled `varnish` binary so FIFO writes stay non-blocking:
 
 ```sh
 . /mnt/SDCARD/Tools/${PLATFORM}/Varnish.pak/scripts/varnish.sh
@@ -96,6 +97,8 @@ All commands are newline-terminated text written to `/tmp/varnish.fifo`.
 
 ### Examples
 
+These direct FIFO examples assume the Varnish daemon is already running:
+
 ```sh
 # Show for 3 seconds at bottom-center
 echo "PILL scrapegoat bottom-center 3 Artwork downloaded!" > /tmp/varnish.fifo
@@ -114,11 +117,18 @@ echo "CLEAR" > /tmp/varnish.fifo
 
 ## Graceful degradation
 
-All IPC calls are non-blocking and fail silently if Varnish is not running. Your Pak does not need to check whether Varnish is installed — just write to the FIFO and move on.
+The C helper in `include/varnish.h` and the bundled `scripts/varnish.sh` helper both treat
+Varnish IPC as best-effort and avoid blocking when the daemon is down.
+
+If you choose to write to `/tmp/varnish.fifo` yourself from shell, do not assume a plain redirect
+is always safe. A FIFO can block if the file exists without an active reader, such as after a
+daemon crash. Guard direct writes with the PID file first:
 
 ```sh
-# This is safe even if Varnish isn't installed
-echo "PILL mypak bottom-center 5 Hello" > /tmp/varnish.fifo 2>/dev/null || true
+# Best-effort send: only write if the Varnish daemon is running
+if [ -r /tmp/varnish.pid ] && kill -0 "$(cat /tmp/varnish.pid)" 2>/dev/null; then
+  printf '%s\n' "PILL mypak bottom-center 5 Hello" > /tmp/varnish.fifo 2>/dev/null || true
+fi
 ```
 
 ---
@@ -175,6 +185,9 @@ Both operations require a reboot for the current launcher session to fully pick 
 | `varnish --ui` | Open the management UI |
 | `varnish --daemon` | Start the daemon directly |
 | `varnish --install` | Enable startup wiring and start the daemon |
+| `varnish --pill <client_id> <position> <duration_secs> <text>` | Send a pill command with a non-blocking FIFO open |
+| `varnish --hide <client_id>` | Hide a client's pill with a non-blocking FIFO open |
+| `varnish --clear` | Clear all pills with a non-blocking FIFO open |
 | `varnish --kill` | Stop the running daemon |
 | `varnish --uninstall` | Disable startup wiring and stop the daemon |
 

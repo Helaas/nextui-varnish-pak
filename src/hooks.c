@@ -129,6 +129,41 @@ static void get_overlay_path(char *out, size_t size) {
     }
 }
 
+static int shell_quote_single(const char *src, char *dst, size_t dst_size) {
+    size_t pos = 0;
+
+    if (!src || !dst || dst_size < 3)
+        return -1;
+
+    dst[pos++] = '\'';
+    while (*src) {
+        unsigned char ch = (unsigned char)*src++;
+
+        if (ch < 0x20 || ch == 0x7f)
+            return -1;
+
+        if (ch == '\'') {
+            if (pos + 4 >= dst_size)
+                return -1;
+            dst[pos++] = '\'';
+            dst[pos++] = '\\';
+            dst[pos++] = '\'';
+            dst[pos++] = '\'';
+            continue;
+        }
+
+        if (pos + 2 > dst_size)
+            return -1;
+        dst[pos++] = (char)ch;
+    }
+
+    if (pos + 2 > dst_size)
+        return -1;
+    dst[pos++] = '\'';
+    dst[pos] = '\0';
+    return 0;
+}
+
 /* ── Script content ────────────────────────────────────────────── */
 
 static const char *boot_script =
@@ -443,6 +478,7 @@ bool hooks_boot_installed(void) {
 
 int hooks_write_startup_env(FILE *out) {
     char overlay_path[MAX_PATH];
+    char overlay_path_quoted[MAX_PATH * 4 + 3];
 
     if (!out) return -1;
     if (!hooks_is_enabled()) return 0;
@@ -450,6 +486,9 @@ int hooks_write_startup_env(FILE *out) {
     get_overlay_path(overlay_path, sizeof(overlay_path));
     if (!overlay_path[0] || access(overlay_path, R_OK) != 0)
         return 0;
+    if (shell_quote_single(overlay_path, overlay_path_quoted,
+                           sizeof(overlay_path_quoted)) != 0)
+        return -1;
 
     /* Re-apply the desired state after an in-app update replaced the script. */
     (void)hooks_install_startup();
@@ -457,10 +496,10 @@ int hooks_write_startup_env(FILE *out) {
 
     fprintf(out,
             "case \":${LD_PRELOAD:-}:\" in\n"
-            "  *\":%s:\"*) ;;\n"
-            "  *) export LD_PRELOAD=\"%s${LD_PRELOAD:+:$LD_PRELOAD}\" ;;\n"
+            "  *:%s:*) ;;\n"
+            "  *) export LD_PRELOAD=%s${LD_PRELOAD:+\":$LD_PRELOAD\"} ;;\n"
             "esac\n",
-            overlay_path, overlay_path);
+            overlay_path_quoted, overlay_path_quoted);
     return ferror(out) ? -1 : 0;
 }
 

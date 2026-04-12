@@ -18,7 +18,7 @@
 
 #define MAX_PATH 512
 
-/* ── Device framebuffer dimensions ────────��───────────────────── */
+/* Device framebuffer dimensions */
 
 #define DEVICE_FB_BRICK_W        1024    /* TrimUI Brick */
 #define DEVICE_FB_BRICK_H         768

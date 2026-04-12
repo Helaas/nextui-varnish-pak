@@ -16,6 +16,7 @@
 #include "ipc.h"
 #include "strutil.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -30,6 +31,53 @@ static int fifo_fd = -1;
 /* Partial line buffer for handling reads that split across calls */
 static char line_buf[1024];
 static int  line_buf_len;
+static int  discarding_line;
+
+static int ipc_valid_client_id(const char *client_id) {
+    const unsigned char *p = (const unsigned char *)client_id;
+
+    if (!client_id || !client_id[0])
+        return 0;
+
+    while (*p) {
+        if (!isalnum(*p) && *p != '_' && *p != '-' && *p != '.')
+            return 0;
+        p++;
+    }
+
+    return 1;
+}
+
+static int ipc_valid_position(const char *position) {
+    return position &&
+           (strcmp(position, "top-left") == 0 ||
+            strcmp(position, "top-center") == 0 ||
+            strcmp(position, "top-right") == 0 ||
+            strcmp(position, "bottom-left") == 0 ||
+            strcmp(position, "bottom-center") == 0 ||
+            strcmp(position, "bottom-right") == 0);
+}
+
+static void ipc_sanitize_text(const char *src, char *dst, size_t dst_size) {
+    size_t i = 0;
+
+    if (!dst || dst_size == 0)
+        return;
+
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+
+    while (*src && i + 1 < dst_size) {
+        char ch = *src++;
+        if (ch == '\n' || ch == '\r')
+            ch = ' ';
+        dst[i++] = ch;
+    }
+
+    dst[i] = '\0';
+}
 
 static int ipc_send_line(const char *line) {
     int fd;
@@ -47,6 +95,45 @@ static int ipc_send_line(const char *line) {
     wrote = write(fd, line, len);
     close(fd);
     return wrote == (ssize_t)len ? 0 : -1;
+}
+
+int ipc_send_pill(const char *client_id, const char *position,
+                  int duration_secs, const char *text) {
+    char sanitized_text[256];
+    char line[384];
+    int line_len;
+
+    if (!ipc_valid_client_id(client_id) ||
+        !ipc_valid_position(position) ||
+        duration_secs < 0 || !text) {
+        return -1;
+    }
+
+    ipc_sanitize_text(text, sanitized_text, sizeof(sanitized_text));
+    line_len = snprintf(line, sizeof(line), "PILL %s %s %d %s\n",
+                        client_id, position, duration_secs, sanitized_text);
+    if (line_len < 0 || line_len >= (int)sizeof(line))
+        return -1;
+
+    return ipc_send_line(line);
+}
+
+int ipc_send_hide(const char *client_id) {
+    char line[96];
+    int line_len;
+
+    if (!ipc_valid_client_id(client_id))
+        return -1;
+
+    line_len = snprintf(line, sizeof(line), "HIDE %s\n", client_id);
+    if (line_len < 0 || line_len >= (int)sizeof(line))
+        return -1;
+
+    return ipc_send_line(line);
+}
+
+int ipc_send_clear(void) {
+    return ipc_send_line("CLEAR\n");
 }
 
 /* ── Daemon side ───────────────────────────────────────────────── */
@@ -75,6 +162,7 @@ int ipc_init(void) {
     }
 
     line_buf_len = 0;
+    discarding_line = 0;
     return 0;
 }
 
@@ -107,6 +195,8 @@ static int parse_line(const char *line, ipc_cmd_t *cmd) {
     }
 
     if (strncmp(line, "HIDE ", 5) == 0) {
+        if (!ipc_valid_client_id(line + 5))
+            return 0;
         cmd->type = IPC_CMD_HIDE;
         str_copy_trunc(cmd->client_id, sizeof(cmd->client_id), line + 5);
         return 1;
@@ -126,6 +216,8 @@ static int parse_line(const char *line, ipc_cmd_t *cmd) {
             memcpy(cmd->client_id, p, len);
             cmd->client_id[len] = '\0';
         }
+        if (!ipc_valid_client_id(cmd->client_id))
+            return 0;
         p = end + 1;
 
         /* position */
@@ -137,11 +229,14 @@ static int parse_line(const char *line, ipc_cmd_t *cmd) {
             memcpy(cmd->position, p, len);
             cmd->position[len] = '\0';
         }
+        if (!ipc_valid_position(cmd->position))
+            return 0;
         p = end + 1;
 
         /* duration_secs */
         cmd->duration_secs = (int)strtol(p, &end, 10);
         if (end == p || (*end != ' ' && *end != '\0')) return 0;
+        if (cmd->duration_secs < 0) return 0;
         if (*end == ' ') end++;
         p = end;
 
@@ -156,38 +251,39 @@ static int parse_line(const char *line, ipc_cmd_t *cmd) {
 }
 
 int ipc_read(ipc_cmd_t *cmd) {
-    char chunk[512];
+    char ch;
     ssize_t n;
+    int parsed;
 
     if (fifo_fd < 0 || !cmd) return 0;
 
-    /* Read available data into the line buffer */
-    while (line_buf_len < (int)sizeof(line_buf) - 1) {
-        n = read(fifo_fd, chunk, sizeof(chunk));
-        if (n <= 0) break;
-        /* Append to line buffer, clamping to available space */
-        int space = (int)sizeof(line_buf) - 1 - line_buf_len;
-        if (n > space) n = space;
-        memcpy(line_buf + line_buf_len, chunk, (size_t)n);
-        line_buf_len += (int)n;
+    while ((n = read(fifo_fd, &ch, 1)) > 0) {
+        if (discarding_line) {
+            if (ch == '\n')
+                discarding_line = 0;
+            continue;
+        }
+
+        if (ch == '\n') {
+            line_buf[line_buf_len] = '\0';
+            parsed = parse_line(line_buf, cmd);
+            line_buf_len = 0;
+            if (parsed)
+                return 1;
+            continue;
+        }
+
+        if (line_buf_len >= (int)sizeof(line_buf) - 1) {
+            line_buf_len = 0;
+            line_buf[0] = '\0';
+            discarding_line = 1;
+            continue;
+        }
+
+        line_buf[line_buf_len++] = ch;
     }
-    line_buf[line_buf_len] = '\0';
 
-    /* Find the first complete line */
-    char *nl = strchr(line_buf, '\n');
-    if (!nl) return 0;
-
-    *nl = '\0';
-    int parsed = parse_line(line_buf, cmd);
-
-    /* Shift remaining data to front of buffer */
-    int consumed = (int)(nl - line_buf) + 1;
-    line_buf_len -= consumed;
-    if (line_buf_len > 0)
-        memmove(line_buf, nl + 1, (size_t)line_buf_len);
-    line_buf[line_buf_len] = '\0';
-
-    return parsed;
+    return 0;
 }
 
 void ipc_write_pid(void) {

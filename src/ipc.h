@@ -5,8 +5,13 @@
 #ifndef VARNISH_IPC_H
 #define VARNISH_IPC_H
 
+#ifndef VARNISH_FIFO_PATH
 #define VARNISH_FIFO_PATH   "/tmp/varnish.fifo"
+#endif
+
+#ifndef VARNISH_PID_PATH
 #define VARNISH_PID_PATH    "/tmp/varnish.pid"
+#endif
 
 typedef enum {
     IPC_CMD_NONE = 0,
@@ -33,6 +38,10 @@ void ipc_cleanup(void);
 void ipc_write_pid(void);
 int  ipc_daemon_running(void);
 int  ipc_kill_daemon(void);
+int  ipc_send_pill(const char *client_id, const char *position,
+                   int duration_secs, const char *text);
+int  ipc_send_hide(const char *client_id);
+int  ipc_send_clear(void);
 int  ipc_hotkeys_reload(void);
 int  ipc_hotkeys_pause(void);
 int  ipc_hotkeys_resume(void);

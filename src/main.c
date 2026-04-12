@@ -7,6 +7,9 @@
  *   varnish --install    Enable startup wiring + start daemon
  *   varnish --uninstall  Disable startup wiring + stop daemon
  *   varnish --kill       Send SIGTERM to running daemon
+ *   varnish --pill ...   Send a pill command to the daemon
+ *   varnish --hide ...   Send a hide command to the daemon
+ *   varnish --clear      Send a clear command to the daemon
  *   varnish --ui         Open the management UI
  */
 
@@ -21,6 +24,7 @@
 #include "ipc.h"
 #include "ui.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,6 +79,69 @@ static int cmd_kill(void) {
         return 1;
     }
     fprintf(stderr, "varnish: daemon stopped\n");
+    return 0;
+}
+
+static int parse_duration_arg(const char *text, int *out) {
+    char *end = NULL;
+    long value;
+
+    if (!text || !out)
+        return -1;
+
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        value < 0 || value > INT_MAX) {
+        return -1;
+    }
+
+    *out = (int)value;
+    return 0;
+}
+
+static int cmd_pill(int argc, char *argv[]) {
+    int duration_secs;
+
+    if (argc != 6 || parse_duration_arg(argv[4], &duration_secs) != 0) {
+        fprintf(stderr,
+                "Usage: varnish --pill <client_id> <position> <duration_secs> <text>\n");
+        return 1;
+    }
+
+    if (ipc_send_pill(argv[2], argv[3], duration_secs, argv[5]) != 0) {
+        fprintf(stderr, "varnish: failed to send pill command\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+static int cmd_hide(int argc, char *argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Usage: varnish --hide <client_id>\n");
+        return 1;
+    }
+
+    if (ipc_send_hide(argv[2]) != 0) {
+        fprintf(stderr, "varnish: failed to send hide command\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+static int cmd_clear(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: varnish --clear\n");
+        return 1;
+    }
+
+    if (ipc_send_clear() != 0) {
+        fprintf(stderr, "varnish: failed to send clear command\n");
+        return 1;
+    }
+
     return 0;
 }
 
@@ -139,6 +206,12 @@ int main(int argc, char *argv[]) {
             return cmd_uninstall();
         if (strcmp(argv[1], "--kill") == 0)
             return cmd_kill();
+        if (strcmp(argv[1], "--pill") == 0)
+            return cmd_pill(argc, argv);
+        if (strcmp(argv[1], "--hide") == 0)
+            return cmd_hide(argc, argv);
+        if (strcmp(argv[1], "--clear") == 0)
+            return cmd_clear(argc, argv);
         if (strcmp(argv[1], "--ui") == 0)
             return cmd_ui(argv[0]);
         if (strcmp(argv[1], "--startup-env") == 0)
@@ -147,7 +220,7 @@ int main(int argc, char *argv[]) {
             return hooks_boot_check(argv[0]);
 
         fprintf(stderr,
-                "Usage: varnish [--daemon|--install|--uninstall|--kill|--ui]\n");
+                "Usage: varnish [--daemon|--install|--uninstall|--kill|--pill|--hide|--clear|--ui]\n");
         return 1;
     }
 

@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static varnish_shm_t *shm_ptr;
@@ -35,9 +36,16 @@ static void slot_finish_write(int idx) {
 /* ── Public API ────────────────────────────────────────────────── */
 
 int shm_init(int fb_width, int fb_height) {
-    shm_fd = open(VARNISH_SHM_PATH, O_RDWR | O_CREAT, 0666);
+    shm_fd = open(VARNISH_SHM_PATH, O_RDWR | O_CREAT, 0600);
     if (shm_fd < 0) {
         perror("varnish: shm open");
+        return -1;
+    }
+
+    if (fchmod(shm_fd, 0600) < 0) {
+        perror("varnish: shm chmod");
+        close(shm_fd);
+        shm_fd = -1;
         return -1;
     }
 
