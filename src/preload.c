@@ -24,9 +24,11 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/mman.h>
 
+#include "preload_capture_policy.h"
 #include "varnish_shm.h"
 
 /* ── SDL constants (avoid pulling in SDL headers) ───────────────── */
@@ -34,6 +36,7 @@
 #define VR_SDL_PIXELFORMAT_ARGB8888     0x16362004u
 #define VR_SDL_TEXTUREACCESS_STREAMING  1
 #define VR_SDL_BLENDMODE_BLEND          1
+#define VARNISH_SDL_BG_CAPTURE_MIN_MS   48u
 
 /* ── Minimal GL declarations (resolved at runtime) ─────────────── */
 
@@ -250,6 +253,7 @@ static int      slot_save_y[VARNISH_MAX_SLOTS];
 static int      slot_save_w[VARNISH_MAX_SLOTS];
 static int      slot_save_h[VARNISH_MAX_SLOTS];
 static int      slot_save_valid[VARNISH_MAX_SLOTS];
+static uint32_t slot_save_last_capture_ms[VARNISH_MAX_SLOTS];
 
 /* ── Full frame save (clean host content for idle-present restore) ── */
 
@@ -267,6 +271,22 @@ static int      full_frame_valid;
 
 static pid_t current_tid(void) {
     return (pid_t)syscall(SYS_gettid);
+}
+
+static uint32_t monotonic_now_ms(void) {
+    struct timespec ts;
+    uint64_t ms;
+
+#ifdef CLOCK_MONOTONIC
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+#else
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+        return 0;
+#endif
+
+    ms = (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+    return (uint32_t)ms;
 }
 
 static void *resolve_symbol_any(const char *name) {
@@ -416,6 +436,13 @@ static void init_shm(void) {
         slot_cached_frame_id[i] = UINT32_MAX;
         slot_texture_frame_id[i] = UINT32_MAX;
         last_present_frame_ids[i] = UINT32_MAX;
+        slot_save_valid[i] = 0;
+        slot_save_renderer[i] = NULL;
+        slot_save_x[i] = 0;
+        slot_save_y[i] = 0;
+        slot_save_w[i] = 0;
+        slot_save_h[i] = 0;
+        slot_save_last_capture_ms[i] = 0;
     }
     gl_reset_resources();
 
@@ -588,6 +615,41 @@ static int collect_active_slots(int *order) {
     }
 
     return count;
+}
+
+static void clear_slot_saved_background_state(int idx) {
+    slot_save_valid[idx] = 0;
+    slot_save_renderer[idx] = NULL;
+    slot_save_x[idx] = 0;
+    slot_save_y[idx] = 0;
+    slot_save_w[idx] = 0;
+    slot_save_h[idx] = 0;
+    slot_save_last_capture_ms[idx] = 0;
+}
+
+static void clear_inactive_slot_saved_backgrounds(void) {
+    for (int i = 0; i < VARNISH_MAX_SLOTS; i++) {
+        if (!slot_cached_active[i])
+            clear_slot_saved_background_state(i);
+    }
+}
+
+static int slot_should_capture_background(void *renderer, int idx, uint32_t now_ms) {
+    return varnish_should_capture_background(
+        slot_save_valid[idx],
+        slot_save_renderer[idx],
+        slot_save_x[idx],
+        slot_save_y[idx],
+        slot_save_w[idx],
+        slot_save_h[idx],
+        slot_save_last_capture_ms[idx],
+        renderer,
+        slot_cached_x[idx],
+        slot_cached_y[idx],
+        slot_cached_w[idx],
+        slot_cached_h[idx],
+        now_ms,
+        VARNISH_SDL_BG_CAPTURE_MIN_MS);
 }
 
 /* ── OpenGL overlay drawing for MinArch ────────────────────────── */
@@ -937,11 +999,11 @@ static int draw_all_gl_overlays(void *window) {
 
 /* ── Per-slot background save / restore ────────────────────────── */
 
-static void save_slot_background(void *renderer, int idx) {
+static int save_slot_background(void *renderer, int idx, uint32_t now_ms) {
     typedef struct { int x, y, w, h; } SDL_Rect;
     SDL_Rect rect;
 
-    if (!pfn_RenderReadPixels) return;
+    if (!pfn_RenderReadPixels) return 0;
 
     rect.x = slot_cached_x[idx];
     rect.y = slot_cached_y[idx];
@@ -950,12 +1012,12 @@ static void save_slot_background(void *renderer, int idx) {
 
     if (rect.w <= 0 || rect.h <= 0 ||
         rect.w > VARNISH_SLOT_MAX_W || rect.h > VARNISH_SLOT_MAX_H)
-        return;
+        return 0;
 
     if (pfn_RenderReadPixels(renderer, &rect, VR_SDL_PIXELFORMAT_ARGB8888,
                               slot_save_pixels[idx],
                               rect.w * (int)sizeof(uint32_t)) != 0)
-        return;
+        return 0;
 
     /* Force alpha=255 on all saved pixels.  Some renderers (framebuffer-
        backed, no alpha channel) return alpha=0 from SDL_RenderReadPixels.
@@ -976,11 +1038,11 @@ static void save_slot_background(void *renderer, int idx) {
     }
 
     if (!slot_save_texture[idx]) {
-        if (!pfn_CreateTexture) return;
+        if (!pfn_CreateTexture) return 0;
         slot_save_texture[idx] = pfn_CreateTexture(
             renderer, VR_SDL_PIXELFORMAT_ARGB8888,
             VR_SDL_TEXTUREACCESS_STREAMING, rect.w, rect.h);
-        if (!slot_save_texture[idx]) return;
+        if (!slot_save_texture[idx]) return 0;
         slot_save_renderer[idx] = renderer;
     }
 
@@ -992,6 +1054,8 @@ static void save_slot_background(void *renderer, int idx) {
     slot_save_w[idx] = rect.w;
     slot_save_h[idx] = rect.h;
     slot_save_valid[idx] = 1;
+    slot_save_last_capture_ms[idx] = now_ms;
+    return 1;
 }
 
 static void restore_slot_background(void *renderer, int idx) {
@@ -1121,6 +1185,7 @@ static void maybe_force_idle_present(void) {
             draw_slot(last_renderer, order[i]);
     }
     real_present(last_renderer);
+    clear_inactive_slot_saved_backgrounds();
     for (i = 0; i < VARNISH_MAX_SLOTS; i++)
         last_present_frame_ids[i] = slot_cached_frame_id[i];
     force_present_guard = 0;
@@ -1131,6 +1196,7 @@ static void maybe_force_idle_present(void) {
 void SDL_RenderPresent(void *renderer) {
     int order[VARNISH_MAX_SLOTS];
     int count;
+    uint32_t now_ms = 0;
 
     if (__builtin_expect(!real_present, 0)) {
         real_present = (fn_SDL_RenderPresent)dlsym(RTLD_NEXT, "SDL_RenderPresent");
@@ -1149,19 +1215,20 @@ void SDL_RenderPresent(void *renderer) {
              * saved full frame so the next idle-present recaptures it.
              * Only per-slot region saves (small, fast) happen here. */
             full_frame_valid = 0;
-            for (int i = 0; i < count; i++)
-                save_slot_background(renderer, order[i]);
+            now_ms = monotonic_now_ms();
+            for (int i = 0; i < count; i++) {
+                if (slot_should_capture_background(renderer, order[i], now_ms))
+                    save_slot_background(renderer, order[i], now_ms);
+            }
             for (int i = 0; i < count; i++)
                 draw_slot(renderer, order[i]);
         } else {
-            /* No overlays — invalidate all stale saves */
             full_frame_valid = 0;
-            for (int i = 0; i < VARNISH_MAX_SLOTS; i++)
-                slot_save_valid[i] = 0;
         }
     }
 
     real_present(renderer);
+    clear_inactive_slot_saved_backgrounds();
     for (int i = 0; i < VARNISH_MAX_SLOTS; i++)
         last_present_frame_ids[i] = slot_cached_frame_id[i];
 }
