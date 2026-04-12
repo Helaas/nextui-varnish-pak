@@ -1098,12 +1098,18 @@ static void maybe_force_idle_present(void) {
     if (!need_present) return;
 
     /*
-     * Restore the full clean frame if available (covers entire screen,
-     * avoids black bars from undefined back-buffer content).  Fall back
-     * to per-slot background restoration when no full frame was saved.
-     * Then composite current overlays fresh.
+     * On the first idle-present after active rendering, the back buffer is
+     * the old front buffer (double-buffered swap).  It has the last host
+     * frame content + old pills.  Restore per-slot backgrounds to erase
+     * the old pills, then capture the full clean frame via a single
+     * ReadPixels.  Subsequent idle-presents reuse the saved full frame
+     * without any ReadPixels — zero per-frame GPU readback cost.
      */
     force_present_guard = 1;
+    if (!full_frame_valid) {
+        restore_all_backgrounds(last_renderer);
+        save_full_frame(last_renderer);
+    }
     if (full_frame_valid)
         restore_full_frame(last_renderer);
     else
@@ -1111,10 +1117,6 @@ static void maybe_force_idle_present(void) {
     if (__builtin_expect(sdl_funcs_ok, 1)) {
         int order[VARNISH_MAX_SLOTS];
         int count = collect_active_slots(order);
-        for (i = 0; i < count; i++) {
-            if (!slot_save_valid[order[i]])
-                save_slot_background(last_renderer, order[i]);
-        }
         for (i = 0; i < count; i++)
             draw_slot(last_renderer, order[i]);
     }
@@ -1143,18 +1145,17 @@ void SDL_RenderPresent(void *renderer) {
         count = collect_active_slots(order);
 
         if (count > 0) {
-            /* Save the full clean frame for idle-present restoration.
-             * This ensures we can repaint the entire screen when pills
-             * disappear during idle (back buffer is undefined after swap). */
-            save_full_frame(renderer);
-            /* Save the clean region behind each pill BEFORE drawing.
-             * Per-slot region readback: ~72KB per pill vs 3MB full frame. */
+            /* Host is actively rendering with overlays — invalidate the
+             * saved full frame so the next idle-present recaptures it.
+             * Only per-slot region saves (small, fast) happen here. */
+            full_frame_valid = 0;
             for (int i = 0; i < count; i++)
                 save_slot_background(renderer, order[i]);
             for (int i = 0; i < count; i++)
                 draw_slot(renderer, order[i]);
         } else {
             /* No overlays — invalidate all stale saves */
+            full_frame_valid = 0;
             for (int i = 0; i < VARNISH_MAX_SLOTS; i++)
                 slot_save_valid[i] = 0;
         }
