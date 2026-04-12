@@ -251,6 +251,18 @@ static int      slot_save_w[VARNISH_MAX_SLOTS];
 static int      slot_save_h[VARNISH_MAX_SLOTS];
 static int      slot_save_valid[VARNISH_MAX_SLOTS];
 
+/* ── Full frame save (clean host content for idle-present restore) ── */
+
+#define FULL_FRAME_MAX_W   1280
+#define FULL_FRAME_MAX_H    768
+
+static uint32_t full_frame_pixels[FULL_FRAME_MAX_W * FULL_FRAME_MAX_H];
+static void    *full_frame_texture;
+static void    *full_frame_renderer;
+static int      full_frame_w;
+static int      full_frame_h;
+static int      full_frame_valid;
+
 /* ── Init helpers ───────────────────────────────────────────────── */
 
 static pid_t current_tid(void) {
@@ -1003,6 +1015,59 @@ static void restore_all_backgrounds(void *renderer) {
         restore_slot_background(renderer, i);
 }
 
+/* ── Full frame save / restore for idle-present ────────────────── */
+
+static void save_full_frame(void *renderer) {
+    int w, h, pixel_count;
+
+    if (!pfn_RenderReadPixels) return;
+    if (!shm || !shm_ok) return;
+
+    w = shm->fb_width;
+    h = shm->fb_height;
+    if (w <= 0 || h <= 0 || w > FULL_FRAME_MAX_W || h > FULL_FRAME_MAX_H)
+        return;
+
+    if (pfn_RenderReadPixels(renderer, NULL, VR_SDL_PIXELFORMAT_ARGB8888,
+                              full_frame_pixels, w * (int)sizeof(uint32_t)) != 0)
+        return;
+
+    pixel_count = w * h;
+    for (int i = 0; i < pixel_count; i++)
+        full_frame_pixels[i] |= 0xFF000000u;
+
+    if (full_frame_texture &&
+        (full_frame_renderer != renderer ||
+         full_frame_w != w || full_frame_h != h)) {
+        pfn_DestroyTexture(full_frame_texture);
+        full_frame_texture = NULL;
+    }
+
+    if (!full_frame_texture) {
+        if (!pfn_CreateTexture) return;
+        full_frame_texture = pfn_CreateTexture(
+            renderer, VR_SDL_PIXELFORMAT_ARGB8888,
+            VR_SDL_TEXTUREACCESS_STREAMING, w, h);
+        if (!full_frame_texture) return;
+        full_frame_renderer = renderer;
+    }
+
+    pfn_UpdateTexture(full_frame_texture, NULL, full_frame_pixels,
+                      w * (int)sizeof(uint32_t));
+
+    full_frame_w = w;
+    full_frame_h = h;
+    full_frame_valid = 1;
+}
+
+static void restore_full_frame(void *renderer) {
+    if (!full_frame_valid || !full_frame_texture || !pfn_RenderCopy)
+        return;
+    if (full_frame_renderer != renderer)
+        return;
+    pfn_RenderCopy(renderer, full_frame_texture, NULL, NULL);
+}
+
 /* ── Idle-present forcing ──────────────────────────────────────── */
 
 static void maybe_force_idle_present(void) {
@@ -1033,13 +1098,16 @@ static void maybe_force_idle_present(void) {
     if (!need_present) return;
 
     /*
-     * Restore saved backgrounds to erase previously-drawn pills, then
-     * composite current overlays fresh.  For newly-active slots that
-     * appeared during idle (no prior save), capture their background
-     * from the current back buffer before drawing.
+     * Restore the full clean frame if available (covers entire screen,
+     * avoids black bars from undefined back-buffer content).  Fall back
+     * to per-slot background restoration when no full frame was saved.
+     * Then composite current overlays fresh.
      */
     force_present_guard = 1;
-    restore_all_backgrounds(last_renderer);
+    if (full_frame_valid)
+        restore_full_frame(last_renderer);
+    else
+        restore_all_backgrounds(last_renderer);
     if (__builtin_expect(sdl_funcs_ok, 1)) {
         int order[VARNISH_MAX_SLOTS];
         int count = collect_active_slots(order);
@@ -1075,6 +1143,10 @@ void SDL_RenderPresent(void *renderer) {
         count = collect_active_slots(order);
 
         if (count > 0) {
+            /* Save the full clean frame for idle-present restoration.
+             * This ensures we can repaint the entire screen when pills
+             * disappear during idle (back buffer is undefined after swap). */
+            save_full_frame(renderer);
             /* Save the clean region behind each pill BEFORE drawing.
              * Per-slot region readback: ~72KB per pill vs 3MB full frame. */
             for (int i = 0; i < count; i++)
