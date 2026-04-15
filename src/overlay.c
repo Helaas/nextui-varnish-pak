@@ -233,19 +233,46 @@ static int load_theme_from_device_nextval(void) {
 
     if (!nextval_path) return -1;
 
-    fp = popen(nextval_path, "r");
-    if (!fp) return -1;
-
-    while (total < sizeof(json) - 1) {
-        size_t n = fread(json + total, 1, sizeof(json) - 1 - total, fp);
-        if (n == 0) break;
-        total += n;
-    }
-    json[total] = '\0';
     {
-        int status = pclose(fp);
-        if (status < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
-            fprintf(stderr, "varnish: nextval.elf exited with error (status=%d)\n", status);
+        int pipefd[2];
+        pid_t child;
+
+        if (pipe(pipefd) < 0) return -1;
+        child = fork();
+        if (child < 0) {
+            close(pipefd[0]);
+            close(pipefd[1]);
+            return -1;
+        }
+        if (child == 0) {
+            close(pipefd[0]);
+            dup2(pipefd[1], STDOUT_FILENO);
+            close(pipefd[1]);
+            execl(nextval_path, nextval_path, (char *)NULL);
+            _exit(127);
+        }
+        close(pipefd[1]);
+        fp = fdopen(pipefd[0], "r");
+        if (!fp) {
+            close(pipefd[0]);
+            waitpid(child, NULL, 0);
+            return -1;
+        }
+
+        while (total < sizeof(json) - 1) {
+            size_t n = fread(json + total, 1, sizeof(json) - 1 - total, fp);
+            if (n == 0) break;
+            total += n;
+        }
+        json[total] = '\0';
+        fclose(fp);
+
+        {
+            int wstatus;
+            waitpid(child, &wstatus, 0);
+            if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0)
+                fprintf(stderr, "varnish: nextval.elf exited with error (status=%d)\n", wstatus);
+        }
     }
 
     if (total == 0) return -1;
@@ -383,7 +410,10 @@ static void fit_text_to_width(const char *src, char *dst, size_t dst_size, int m
     while (len > 0) {
         int candidate_w = 0;
 
+        len--;
         len = utf8_trim_boundary(src, len);
+        if (len == 0) break;
+
         memcpy(candidate, src, len);
         candidate[len] = '\0';
         strncat(candidate, ellipsis, sizeof(candidate) - strlen(candidate) - 1);
@@ -393,9 +423,6 @@ static void fit_text_to_width(const char *src, char *dst, size_t dst_size, int m
             str_copy_trunc(dst, dst_size, candidate);
             return;
         }
-
-        if (len == 0) break;
-        len--;
     }
 
     str_copy_trunc(dst, dst_size, ellipsis);

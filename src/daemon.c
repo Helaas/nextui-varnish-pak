@@ -381,10 +381,11 @@ int daemon_run(void) {
     /* Daemonize (fork to background) */
     daemonize();
 
-    /* Install signal handlers */
-    signal(SIGTERM, signal_handler);
-    signal(SIGINT, signal_handler);
-    signal(SIGPIPE, SIG_IGN);
+    /* Reject duplicate instances */
+    if (ipc_daemon_running()) {
+        fprintf(stderr, "varnish: daemon already running\n");
+        return 1;
+    }
 
     /* Write PID file */
     ipc_write_pid();
@@ -422,6 +423,11 @@ int daemon_run(void) {
 
     memset(slots, 0, sizeof(slots));
     manual_session_init(&manual_session);
+
+    /* Install signal handlers after all init is complete */
+    signal(SIGTERM, signal_handler);
+    signal(SIGINT, signal_handler);
+    signal(SIGPIPE, SIG_IGN);
 
     fprintf(stderr, "varnish: daemon started (pid %d, fb %dx%d)\n",
             (int)getpid(), fb_width, fb_height);

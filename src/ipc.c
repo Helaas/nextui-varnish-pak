@@ -30,6 +30,7 @@
 #include <unistd.h>
 
 static int fifo_fd = -1;
+static int fifo_wr_fd = -1;
 
 /* Partial line buffer for handling reads that split across calls */
 static char line_buf[1024];
@@ -143,21 +144,21 @@ int ipc_send_clear(void) {
 
 int ipc_init(void) {
     unlink(VARNISH_FIFO_PATH);
-    if (mkfifo(VARNISH_FIFO_PATH, 0666) < 0 && errno != EEXIST) {
+    if (mkfifo(VARNISH_FIFO_PATH, 0600) < 0 && errno != EEXIST) {
         perror("varnish: mkfifo");
         return -1;
     }
 
-    fifo_fd = open(VARNISH_FIFO_PATH, O_RDONLY | O_NONBLOCK);
+    fifo_fd = open(VARNISH_FIFO_PATH, O_RDONLY | O_NONBLOCK | O_NOFOLLOW);
     if (fifo_fd < 0) {
         perror("varnish: open fifo (rd)");
         return -1;
     }
 
     /* Keep a write-end open so reads never return EOF when the last
-       writer closes.  Intentionally leaked for daemon lifetime. */
-    int wr = open(VARNISH_FIFO_PATH, O_WRONLY | O_NONBLOCK);
-    if (wr < 0) {
+       writer closes.  Closed in ipc_cleanup(). */
+    fifo_wr_fd = open(VARNISH_FIFO_PATH, O_WRONLY | O_NONBLOCK | O_NOFOLLOW);
+    if (fifo_wr_fd < 0) {
         perror("varnish: open fifo (wr-keepalive)");
         close(fifo_fd);
         fifo_fd = -1;
@@ -363,6 +364,7 @@ int ipc_record_toggle(void) {
 }
 
 void ipc_cleanup(void) {
+    if (fifo_wr_fd >= 0) { close(fifo_wr_fd); fifo_wr_fd = -1; }
     if (fifo_fd >= 0) { close(fifo_fd); fifo_fd = -1; }
     unlink(VARNISH_FIFO_PATH);
     unlink(VARNISH_PID_PATH);

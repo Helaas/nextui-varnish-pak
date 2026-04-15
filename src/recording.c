@@ -338,8 +338,9 @@ static int recording_spawn_encoder(varnish_recording_session *session) {
                                        sizeof(argv_const) / sizeof(argv_const[0]));
     if (argc == 0u)
         return -1;
-    for (i = 0u; i <= argc; i++)
+    for (i = 0u; i < argc; i++)
         argv_exec[i] = (char *)argv_const[i];
+    argv_exec[argc] = NULL;
 
     if (pipe(pipe_fds) != 0)
         return -1;

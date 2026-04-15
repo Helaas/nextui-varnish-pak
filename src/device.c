@@ -128,7 +128,8 @@ void device_get_shared_userdata_path(char *out, size_t size) {
 void device_get_system_bin_path(char *out, size_t size) {
     const char *sys = getenv("SYSTEM_PATH");
     if (sys && sys[0]) {
-        snprintf(out, size, "%s/bin", sys);
+        if ((size_t)snprintf(out, size, "%s/bin", sys) >= size)
+            out[0] = '\0';
         return;
     }
 #ifndef PLATFORM_MAC
@@ -137,7 +138,8 @@ void device_get_system_bin_path(char *out, size_t size) {
 
     device_get_sdcard_path(sd, sizeof(sd));
     device_get_platform_name(platform, sizeof(platform));
-    snprintf(out, size, "%s/.system/%s/bin", sd, platform);
+    if ((size_t)snprintf(out, size, "%s/.system/%s/bin", sd, platform) >= size)
+        out[0] = '\0';
 #else
     out[0] = '\0';
 #endif
@@ -156,7 +158,8 @@ void device_get_pak_dir(char *out, size_t size) {
 
     device_get_sdcard_path(sd, sizeof(sd));
     device_get_platform_name(platform, sizeof(platform));
-    snprintf(out, size, "%s/Tools/%s/Varnish.pak", sd, platform);
+    if ((size_t)snprintf(out, size, "%s/Tools/%s/Varnish.pak", sd, platform) >= size)
+        out[0] = '\0';
 #else
     char sd[MAX_PATH];
     char platform[32];
@@ -168,7 +171,8 @@ void device_get_pak_dir(char *out, size_t size) {
         return;
     }
 
-    snprintf(out, size, "%s/Tools/%s/Varnish.pak", sd, platform);
+    if ((size_t)snprintf(out, size, "%s/Tools/%s/Varnish.pak", sd, platform) >= size)
+        out[0] = '\0';
 #endif
 }
 

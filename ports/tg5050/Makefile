@@ -9,7 +9,7 @@ PKG_CONFIG := pkg-config
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2)
 SDL_LDFLAGS := $(shell $(PKG_CONFIG) --libs sdl2) -lSDL2_ttf -lSDL2_image
 
-CFLAGS := -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter \
+CFLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter \
 	-mcpu=cortex-a55 -mtune=cortex-a55 \
 	-DPLATFORM_TG5050 \
 	-ffunction-sections -fdata-sections -fstack-protector-strong \
@@ -26,7 +26,7 @@ $(BUILD_DIR)/varnish: $(SRC)
 
 $(BUILD_DIR)/varnish_overlay.so: /workspace/src/preload.c /workspace/src/varnish_shm.h
 	@mkdir -p $(BUILD_DIR)
-	$(CC) -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter \
+	$(CC) -std=gnu11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter \
 		-mcpu=cortex-a55 -mtune=cortex-a55 \
 		-DPLATFORM_TG5050 \
 		-fPIC -shared \

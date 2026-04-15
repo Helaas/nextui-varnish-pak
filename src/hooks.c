@@ -129,6 +129,13 @@ static void get_overlay_path(char *out, size_t size) {
     }
 }
 
+/*
+ * Wrap `src` in POSIX single quotes for safe shell embedding.
+ * Internal single quotes are escaped as '\'' (end-quote, escaped-quote,
+ * start-quote).  Control characters (< 0x20, 0x7f) are rejected.
+ * Returns 0 on success, -1 on error (NULL args, too small dst, or
+ * control characters found).
+ */
 static int shell_quote_single(const char *src, char *dst, size_t dst_size) {
     size_t pos = 0;
 

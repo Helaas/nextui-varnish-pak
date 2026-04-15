@@ -30,6 +30,7 @@
 #define VARNISH_CLIENT_H
 
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -98,7 +99,9 @@ static inline int varnish_send_line(const char *line) {
         return -1;
 
     len = strlen(line);
-    wrote = write(fd, line, len);
+    do {
+        wrote = write(fd, line, len);
+    } while (wrote < 0 && errno == EINTR);
     close(fd);
     return wrote == (ssize_t)len ? 0 : -1;
 }

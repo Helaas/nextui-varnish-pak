@@ -606,7 +606,8 @@ static int capture_recording_gl_frame(void *window, uint32_t now_ms) {
         }
     }
     if (width <= 0 || height <= 0 ||
-        width > VARNISH_RECORDING_MAX_W || height > VARNISH_RECORDING_MAX_H) {
+        width > VARNISH_RECORDING_MAX_W || height > VARNISH_RECORDING_MAX_H ||
+        (size_t)width * (size_t)height * 4u > sizeof(record_gl_rgba)) {
         return 0;
     }
 

@@ -349,6 +349,10 @@ static int manual_rewrite_last_browse_directory(const char *config_path,
         }
 
         prefix_len = (size_t)(closing - buf);
+        if (prefix_len > SIZE_MAX - 2048) {
+            free(buf);
+            return -1;
+        }
         needed = prefix_len + strlen(",\n  \"lastBrowseDirectory\": \"\"\n}\n") +
                  strlen(escaped) + 1;
         rewritten = (char *)malloc(needed);
@@ -591,6 +595,7 @@ int manual_find_active_minarch(pid_t *out_pid,
                 pid = 0;
                 break;
             }
+            if (pid > 999999) { pid = 0; break; }
             pid = pid * 10 + (*p - '0');
         }
         if (pid <= 0)
