@@ -84,6 +84,18 @@ static void test_ipc_send_helpers(void) {
     CHECK(ipc_send_clear() == 0, "ipc_send_clear should succeed");
     CHECK(wait_for_cmd(&cmd), "expected CLEAR command");
     CHECK(cmd.type == IPC_CMD_CLEAR, "expected CLEAR command type");
+
+    CHECK(ipc_record_start() == 0, "ipc_record_start should succeed");
+    CHECK(wait_for_cmd(&cmd), "expected RECORD_START command");
+    CHECK(cmd.type == IPC_CMD_RECORD_START, "expected RECORD_START command type");
+
+    CHECK(ipc_record_stop() == 0, "ipc_record_stop should succeed");
+    CHECK(wait_for_cmd(&cmd), "expected RECORD_STOP command");
+    CHECK(cmd.type == IPC_CMD_RECORD_STOP, "expected RECORD_STOP command type");
+
+    CHECK(ipc_record_toggle() == 0, "ipc_record_toggle should succeed");
+    CHECK(wait_for_cmd(&cmd), "expected RECORD_TOGGLE command");
+    CHECK(cmd.type == IPC_CMD_RECORD_TOGGLE, "expected RECORD_TOGGLE command type");
 }
 
 static void test_overlong_line_is_discarded(void) {

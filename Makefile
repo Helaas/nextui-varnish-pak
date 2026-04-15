@@ -18,12 +18,15 @@ TG5040_TOOLCHAIN := ghcr.io/loveretro/tg5040-toolchain:latest
 TG5050_TOOLCHAIN := ghcr.io/loveretro/tg5050-toolchain:latest
 MY355_TOOLCHAIN  := ghcr.io/loveretro/my355-toolchain:latest
 ADB ?= adb
+FFMPEG_SCRIPT := /workspace/scripts/build_ffmpeg.sh
 
 COMMON_INCLUDES := -I$(APOSTROPHE_DIR)/include -Isrc
 
 .PHONY: all native mac run-mac tg5040 tg5050 my355 test-hooks test-hotkeys test-ipc test-preload-capture \
-	package package-tg5040 package-tg5050 package-my355 do-package \
-	deploy deploy-platform clean help update-apostrophe
+		ffmpeg-tg5040 ffmpeg-tg5050 ffmpeg-my355 ffmpeg-all \
+		test-recording-transport test-recording-policy test-recording-profile test-recording-session test-recording \
+		package package-tg5040 package-tg5050 package-my355 do-package \
+		deploy deploy-platform clean help update-apostrophe
 
 # ── Default target ──────────────────────────────────────────
 
@@ -95,15 +98,52 @@ test-ipc:
 test-preload-capture:
 	sh tests/test_preload_capture.sh
 
+test-recording-transport:
+	sh tests/test_recording_transport.sh
+
+test-recording-policy:
+	sh tests/test_recording_policy.sh
+
+test-recording-profile:
+	sh tests/test_recording_profile.sh
+
+test-recording-session:
+	sh tests/test_recording_session.sh
+
+test-recording: test-recording-transport test-recording-policy test-recording-profile test-recording-session
+
+ffmpeg-tg5040:
+	@mkdir -p $(BUILD_DIR)/third_party/tg5040
+	docker run --rm \
+		-v "$(CURDIR)":/workspace \
+		$(TG5040_TOOLCHAIN) \
+		bash $(FFMPEG_SCRIPT) ensure-ffmpeg tg5040
+
+ffmpeg-tg5050:
+	@mkdir -p $(BUILD_DIR)/third_party/tg5050
+	docker run --rm \
+		-v "$(CURDIR)":/workspace \
+		$(TG5050_TOOLCHAIN) \
+		bash $(FFMPEG_SCRIPT) ensure-ffmpeg tg5050
+
+ffmpeg-my355:
+	@mkdir -p $(BUILD_DIR)/third_party/my355
+	docker run --rm \
+		-v "$(CURDIR)":/workspace \
+		$(MY355_TOOLCHAIN) \
+		bash $(FFMPEG_SCRIPT) ensure-ffmpeg my355
+
+ffmpeg-all: ffmpeg-tg5040 ffmpeg-tg5050 ffmpeg-my355
+
 # ── Packaging ───────────────────────────────────────────────
 
-package-tg5040: tg5040
+package-tg5040: tg5040 ffmpeg-tg5040
 	@$(MAKE) do-package PLATFORM=tg5040
 
-package-tg5050: tg5050
+package-tg5050: tg5050 ffmpeg-tg5050
 	@$(MAKE) do-package PLATFORM=tg5050
 
-package-my355: my355
+package-my355: my355 ffmpeg-my355
 	@$(MAKE) do-package PLATFORM=my355
 
 do-package:
@@ -119,6 +159,17 @@ do-package:
 	@cp include/varnish.h $(BUILD_DIR)/$(PLATFORM)/$(PAK_NAME).pak/include/
 	@mkdir -p $(BUILD_DIR)/$(PLATFORM)/$(PAK_NAME).pak/scripts
 	@cp scripts/varnish.sh $(BUILD_DIR)/$(PLATFORM)/$(PAK_NAME).pak/scripts/
+	@if [ -d "$(BUILD_DIR)/third_party/$(PLATFORM)/ffmpeg/package/bin" ]; then \
+		mkdir -p "$(BUILD_DIR)/$(PLATFORM)/$(PAK_NAME).pak/bin"; \
+		cp -a "$(BUILD_DIR)/third_party/$(PLATFORM)/ffmpeg/package/bin/." "$(BUILD_DIR)/$(PLATFORM)/$(PAK_NAME).pak/bin/"; \
+	else \
+		echo "Error: ffmpeg runtime missing for $(PLATFORM)"; \
+		exit 1; \
+	fi
+	@if [ -d "$(BUILD_DIR)/third_party/$(PLATFORM)/ffmpeg/package/lib" ]; then \
+		mkdir -p "$(BUILD_DIR)/$(PLATFORM)/$(PAK_NAME).pak/lib"; \
+		cp -a "$(BUILD_DIR)/third_party/$(PLATFORM)/ffmpeg/package/lib/." "$(BUILD_DIR)/$(PLATFORM)/$(PAK_NAME).pak/lib/"; \
+	fi
 	@mkdir -p $(DIST_DIR)/$(PLATFORM)
 	@rm -f $(DIST_DIR)/$(PLATFORM)/$(PAK_NAME).pak.zip
 	@cd $(BUILD_DIR)/$(PLATFORM) && zip -r "$(CURDIR)/$(DIST_DIR)/$(PLATFORM)/$(PAK_NAME).pak.zip" "$(PAK_NAME).pak" -x '.*'
@@ -209,6 +260,17 @@ help:
 	@echo "  test-hotkeys  Run host-side hotkey and screenshot-path tests"
 	@echo "  test-ipc      Run host-side FIFO IPC and client helper tests"
 	@echo "  test-preload-capture  Run host-side SDL background capture policy tests"
+	@echo "  test-recording-policy Run host-side recording cadence policy tests"
+	@echo "  test-recording-profile Run host-side recording output/profile tests"
+	@echo "  test-recording-session Run host-side recording lifecycle tests"
+	@echo "  test-recording   Run all host-side recording tests"
+	@echo "  ffmpeg-tg5040 Build the bundled ffmpeg runtime for TG5040"
+	@echo "  ffmpeg-tg5050 Build the bundled ffmpeg runtime for TG5050"
+	@echo "  ffmpeg-my355  Build the bundled ffmpeg runtime for my355"
+	@echo "  ffmpeg-all    Build the bundled ffmpeg runtime for all device platforms"
+	@echo "  test-recording-transport  Run host-side recorder transport tests"
+	@echo "  test-recording-policy  Run host-side recorder cadence policy tests"
+	@echo "  test-recording  Run all host-side recorder tests"
 	@echo "  package       Package all platforms (.pak.zip + .pakz)"
 	@echo "  deploy        Detect adb platform, package, and push"
 	@echo "  update-apostrophe  Pin Apostrophe submodule to origin/main"

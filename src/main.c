@@ -10,6 +10,9 @@
  *   varnish --pill ...   Send a pill command to the daemon
  *   varnish --hide ...   Send a hide command to the daemon
  *   varnish --clear      Send a clear command to the daemon
+ *   varnish --record-start   Start video recording
+ *   varnish --record-stop    Stop video recording
+ *   varnish --record-toggle  Toggle video recording
  *   varnish --ui         Open the management UI
  */
 
@@ -145,6 +148,42 @@ static int cmd_clear(int argc, char *argv[]) {
     return 0;
 }
 
+static int cmd_record_start(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: varnish --record-start\n");
+        return 1;
+    }
+    if (ipc_record_start() != 0) {
+        fprintf(stderr, "varnish: failed to send record-start command\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int cmd_record_stop(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: varnish --record-stop\n");
+        return 1;
+    }
+    if (ipc_record_stop() != 0) {
+        fprintf(stderr, "varnish: failed to send record-stop command\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int cmd_record_toggle(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: varnish --record-toggle\n");
+        return 1;
+    }
+    if (ipc_record_toggle() != 0) {
+        fprintf(stderr, "varnish: failed to send record-toggle command\n");
+        return 1;
+    }
+    return 0;
+}
+
 static const char *resolve_font_path(const char *self_path,
                                      char *buf, size_t buf_size) {
 #ifdef PLATFORM_MAC
@@ -212,6 +251,12 @@ int main(int argc, char *argv[]) {
             return cmd_hide(argc, argv);
         if (strcmp(argv[1], "--clear") == 0)
             return cmd_clear(argc, argv);
+        if (strcmp(argv[1], "--record-start") == 0)
+            return cmd_record_start(argc, argv);
+        if (strcmp(argv[1], "--record-stop") == 0)
+            return cmd_record_stop(argc, argv);
+        if (strcmp(argv[1], "--record-toggle") == 0)
+            return cmd_record_toggle(argc, argv);
         if (strcmp(argv[1], "--ui") == 0)
             return cmd_ui(argv[0]);
         if (strcmp(argv[1], "--startup-env") == 0)
@@ -220,7 +265,7 @@ int main(int argc, char *argv[]) {
             return hooks_boot_check(argv[0]);
 
         fprintf(stderr,
-                "Usage: varnish [--daemon|--install|--uninstall|--kill|--pill|--hide|--clear|--ui]\n");
+                "Usage: varnish [--daemon|--install|--uninstall|--kill|--pill|--hide|--clear|--record-start|--record-stop|--record-toggle|--ui]\n");
         return 1;
     }
 

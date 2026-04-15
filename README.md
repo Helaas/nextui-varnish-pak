@@ -157,8 +157,11 @@ Hotkeys are stored at:
 Current v1 action:
 
 - `Screenshot` — capture the current framebuffer to `/mnt/SDCARD/Screenshots`
+- `Record Video` — toggle low-rate video capture to `/mnt/SDCARD/Videos/Varnish`
 
 Hotkeys are active only while Varnish is enabled and its daemon is running. The settings UI pauses hotkeys while it is open so editing a binding does not accidentally trigger it.
+
+Video capture records the menu SDL path and MinArch's OpenGL path through the existing preload hook. Frames are read back before Varnish draws its overlays, so the persistent `REC` pill stays visible on-device without being baked into the video.
 
 Saving `Enabled = On`:
 
@@ -188,6 +191,9 @@ Both operations require a reboot for the current launcher session to fully pick 
 | `varnish --pill <client_id> <position> <duration_secs> <text>` | Send a pill command with a non-blocking FIFO open |
 | `varnish --hide <client_id>` | Hide a client's pill with a non-blocking FIFO open |
 | `varnish --clear` | Clear all pills with a non-blocking FIFO open |
+| `varnish --record-start` | Start video recording |
+| `varnish --record-stop` | Stop video recording and finalize the AVI |
+| `varnish --record-toggle` | Toggle video recording |
 | `varnish --kill` | Stop the running daemon |
 | `varnish --uninstall` | Disable startup wiring and stop the daemon |
 
@@ -241,3 +247,9 @@ make deploy
 Produces two artifacts per platform:
 - `varnish` — the daemon binary
 - `varnish_overlay.so` — the preload hook injected through the patched NextUI startup chain
+
+Bundled ffmpeg packaging:
+
+- `make ffmpeg-tg5040`, `make ffmpeg-tg5050`, and `make ffmpeg-my355` cross-build a pinned minimal ffmpeg from source inside the platform toolchain container
+- `make package-*` now depends on the matching ffmpeg target and stages the built runtime from `build/third_party/<platform>/ffmpeg/package`
+- `make package` and `make deploy` therefore include `bin/ffmpeg` in the final pak automatically

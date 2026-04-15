@@ -133,6 +133,7 @@ static void test_config_roundtrip(const char *root) {
     hotkeys_config_init(&saved);
     saved.screenshot_mask = parse_mask_or_fail("L1+R1");
     saved.manual_mask = parse_mask_or_fail("L2+R2");
+    saved.record_mask = parse_mask_or_fail("L1+R2");
 
     CHECK(hotkeys_save_config(&saved) == 0, "save config failed");
 
@@ -142,6 +143,8 @@ static void test_config_roundtrip(const char *root) {
           "saved config should contain normalized screenshot binding");
     CHECK(strstr(content, "manual=L2+R2") != NULL,
           "saved config should contain normalized manual binding");
+    CHECK(strstr(content, "record=L1+R2") != NULL,
+          "saved config should contain normalized record binding");
     free(content);
 
     hotkeys_config_init(&loaded);
@@ -150,6 +153,8 @@ static void test_config_roundtrip(const char *root) {
           "loaded config should match saved config");
     CHECK(loaded.manual_mask == saved.manual_mask,
           "loaded manual config should match saved config");
+    CHECK(loaded.record_mask == saved.record_mask,
+          "loaded record config should match saved config");
 }
 
 static void test_config_errors(const char *root) {
@@ -160,7 +165,7 @@ static void test_config_errors(const char *root) {
     snprintf(path, sizeof(path), "%s/userdata/tg5040/Varnish/keybinds.txt", root);
     f = fopen(path, "wb");
     CHECK(f != NULL, "could not write malformed config");
-    fputs("screenshot=POWER+L1\nmanual=L2+R2\n", f);
+    fputs("screenshot=POWER+L1\nmanual=L2+R2\nrecord=L1+R2\n", f);
     fclose(f);
 
     hotkeys_config_init(&config);
@@ -168,14 +173,17 @@ static void test_config_errors(const char *root) {
     CHECK(config.screenshot_mask == 0u, "malformed binding should be disabled");
     CHECK(config.manual_mask == parse_mask_or_fail("L2+R2"),
           "valid manual binding should still load");
+    CHECK(config.record_mask == parse_mask_or_fail("L1+R2"),
+          "valid record binding should still load");
 }
 
 static void test_logic_one_shot(void) {
     varnish_hotkey_logic logic;
     uint32_t screenshot_mask = parse_mask_or_fail("L1+R1");
     uint32_t manual_mask = parse_mask_or_fail("L2+R2");
+    uint32_t record_mask = parse_mask_or_fail("L1+R2");
 
-    hotkeys_logic_init(&logic, screenshot_mask, manual_mask);
+    hotkeys_logic_init(&logic, screenshot_mask, manual_mask, record_mask);
 
     CHECK(hotkeys_logic_update(&logic, 0u) == VARNISH_HOTKEY_ACTION_NONE,
           "release should not trigger");
@@ -196,14 +204,19 @@ static void test_logic_one_shot(void) {
           "second release should reset for manual action");
     CHECK(hotkeys_logic_update(&logic, manual_mask) == VARNISH_HOTKEY_ACTION_MANUAL,
           "manual chord should trigger its own action");
+    CHECK(hotkeys_logic_update(&logic, 0u) == VARNISH_HOTKEY_ACTION_NONE,
+          "manual release should reset for record action");
+    CHECK(hotkeys_logic_update(&logic, record_mask) == VARNISH_HOTKEY_ACTION_RECORD_TOGGLE,
+          "record chord should trigger its own action");
 }
 
 static void test_logic_pause_resume(void) {
     varnish_hotkey_logic logic;
     uint32_t screenshot_mask = parse_mask_or_fail("L1+R1");
     uint32_t manual_mask = parse_mask_or_fail("L2+R2");
+    uint32_t record_mask = parse_mask_or_fail("L1+R2");
 
-    hotkeys_logic_init(&logic, screenshot_mask, manual_mask);
+    hotkeys_logic_init(&logic, screenshot_mask, manual_mask, record_mask);
     CHECK(hotkeys_logic_update(&logic, 0u) == VARNISH_HOTKEY_ACTION_NONE,
           "initial release should clear wait state");
 
@@ -217,6 +230,10 @@ static void test_logic_pause_resume(void) {
           "release should re-arm after resume");
     CHECK(hotkeys_logic_update(&logic, manual_mask) == VARNISH_HOTKEY_ACTION_MANUAL,
           "manual chord should trigger after resume and release");
+    CHECK(hotkeys_logic_update(&logic, 0u) == VARNISH_HOTKEY_ACTION_NONE,
+          "release should re-arm after manual");
+    CHECK(hotkeys_logic_update(&logic, record_mask) == VARNISH_HOTKEY_ACTION_RECORD_TOGGLE,
+          "record chord should trigger after resume flow");
 }
 
 static void test_screenshot_path_collision(const char *root) {

@@ -11,6 +11,9 @@
  *   HOTKEYS_RELOAD
  *   HOTKEYS_PAUSE
  *   HOTKEYS_RESUME
+ *   RECORD_START
+ *   RECORD_STOP
+ *   RECORD_TOGGLE
  */
 
 #include "ipc.h"
@@ -194,6 +197,21 @@ static int parse_line(const char *line, ipc_cmd_t *cmd) {
         return 1;
     }
 
+    if (strcmp(line, "RECORD_START") == 0) {
+        cmd->type = IPC_CMD_RECORD_START;
+        return 1;
+    }
+
+    if (strcmp(line, "RECORD_STOP") == 0) {
+        cmd->type = IPC_CMD_RECORD_STOP;
+        return 1;
+    }
+
+    if (strcmp(line, "RECORD_TOGGLE") == 0) {
+        cmd->type = IPC_CMD_RECORD_TOGGLE;
+        return 1;
+    }
+
     if (strncmp(line, "HIDE ", 5) == 0) {
         if (!ipc_valid_client_id(line + 5))
             return 0;
@@ -330,6 +348,18 @@ int ipc_hotkeys_pause(void) {
 
 int ipc_hotkeys_resume(void) {
     return ipc_send_line("HOTKEYS_RESUME\n");
+}
+
+int ipc_record_start(void) {
+    return ipc_send_line("RECORD_START\n");
+}
+
+int ipc_record_stop(void) {
+    return ipc_send_line("RECORD_STOP\n");
+}
+
+int ipc_record_toggle(void) {
+    return ipc_send_line("RECORD_TOGGLE\n");
 }
 
 void ipc_cleanup(void) {

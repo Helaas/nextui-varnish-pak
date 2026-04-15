@@ -29,6 +29,8 @@
 #include <sys/mman.h>
 
 #include "preload_capture_policy.h"
+#include "preload_recording_policy.h"
+#include "recording_transport.h"
 #include "varnish_shm.h"
 
 /* ── SDL constants (avoid pulling in SDL headers) ───────────────── */
@@ -140,6 +142,7 @@ typedef void      (*fn_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, 
 typedef void      (*fn_glDrawArrays)(GLenum, GLint, GLsizei);
 typedef void      (*fn_glGetIntegerv)(GLenum, GLint *);
 typedef GLboolean (*fn_glIsEnabled)(GLenum);
+typedef void      (*fn_glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *);
 
 static fn_SDL_RenderPresent       real_present;
 static fn_SDL_GL_SwapWindow       real_gl_swap;
@@ -194,6 +197,7 @@ static fn_glVertexAttribPointer       pfn_glVertexAttribPointer;
 static fn_glDrawArrays                pfn_glDrawArrays;
 static fn_glGetIntegerv               pfn_glGetIntegerv;
 static fn_glIsEnabled                 pfn_glIsEnabled;
+static fn_glReadPixels                pfn_glReadPixels;
 static int gl_funcs_ok;
 
 /* ── Shared memory state (lazy init) ────────────────────────────── */
@@ -202,6 +206,11 @@ static varnish_shm_t *shm;
 static int shm_fd = -1;
 static int shm_ok;
 static uint32_t shm_retry_after_ms;
+
+static varnish_recording_shm_t *recording_shm;
+static int recording_shm_fd = -1;
+static int recording_shm_ok;
+static uint32_t recording_retry_after_ms;
 
 /* ── Per-slot cached overlay state ──────────────────────────────── */
 
@@ -268,6 +277,9 @@ static void    *full_frame_renderer;
 static int      full_frame_w;
 static int      full_frame_h;
 static int      full_frame_valid;
+
+static uint32_t record_last_capture_ms;
+static uint8_t  record_gl_rgba[VARNISH_RECORDING_MAX_W * VARNISH_RECORDING_MAX_H * 4];
 
 /* ── Init helpers ───────────────────────────────────────────────── */
 
@@ -383,6 +395,7 @@ static void init_gl_funcs(void) {
     pfn_glDrawArrays = (fn_glDrawArrays)resolve_gl_symbol("glDrawArrays");
     pfn_glGetIntegerv = (fn_glGetIntegerv)resolve_gl_symbol("glGetIntegerv");
     pfn_glIsEnabled = (fn_glIsEnabled)resolve_gl_symbol("glIsEnabled");
+    pfn_glReadPixels = (fn_glReadPixels)resolve_gl_symbol("glReadPixels");
 
     gl_funcs_ok = pfn_glCreateShader && pfn_glShaderSource && pfn_glCompileShader &&
                   pfn_glGetShaderiv && pfn_glDeleteShader && pfn_glCreateProgram &&
@@ -463,6 +476,165 @@ static int ensure_shm_ready(uint32_t now_ms) {
     if (!shm_ok)
         shm_retry_after_ms = now_ms + VARNISH_SHM_RETRY_MIN_MS;
     return shm_ok;
+}
+
+static void init_recording_shm(void) {
+    recording_shm_fd = open(VARNISH_RECORDING_SHM_PATH, O_RDWR);
+    if (recording_shm_fd < 0)
+        return;
+
+    recording_shm = (varnish_recording_shm_t *)mmap(
+        NULL, sizeof(varnish_recording_shm_t),
+        PROT_READ | PROT_WRITE, MAP_SHARED, recording_shm_fd, 0);
+
+    if (recording_shm == MAP_FAILED) {
+        recording_shm = NULL;
+        close(recording_shm_fd);
+        recording_shm_fd = -1;
+        return;
+    }
+
+    if (recording_shm->magic != VARNISH_RECORDING_MAGIC) {
+        munmap(recording_shm, sizeof(varnish_recording_shm_t));
+        recording_shm = NULL;
+        close(recording_shm_fd);
+        recording_shm_fd = -1;
+        return;
+    }
+
+    recording_shm_ok = 1;
+    recording_retry_after_ms = 0u;
+    record_last_capture_ms = 0u;
+}
+
+static int ensure_recording_shm_ready(uint32_t now_ms) {
+    if (recording_shm_ok)
+        return 1;
+
+    if (!varnish_retry_deadline_reached(now_ms, recording_retry_after_ms))
+        return 0;
+
+    init_recording_shm();
+    if (!recording_shm_ok)
+        recording_retry_after_ms = now_ms + VARNISH_SHM_RETRY_MIN_MS;
+    return recording_shm_ok;
+}
+
+static int recording_capture_allowed(uint32_t now_ms) {
+    if (!ensure_recording_shm_ready(now_ms))
+        return 0;
+    if (!recording_shm->active) {
+        record_last_capture_ms = 0u;
+        return 0;
+    }
+    return varnish_should_capture_recording_frame(
+        1, record_last_capture_ms, now_ms, recording_shm->cadence_ms);
+}
+
+static void recording_force_alpha(uint32_t *pixels, int width, int height) {
+    int pixel_count = width * height;
+
+    for (int i = 0; i < pixel_count; i++)
+        pixels[i] |= 0xFF000000u;
+}
+
+static int capture_recording_sdl_frame(void *renderer, uint32_t now_ms) {
+    uint32_t slot_index;
+    uint32_t *dst_pixels;
+    int32_t producer_pid;
+    int width;
+    int height;
+
+    if (!pfn_RenderReadPixels)
+        return 0;
+    if (!recording_capture_allowed(now_ms))
+        return 0;
+    producer_pid = (int32_t)getpid();
+    if (!varnish_recording_try_acquire_producer(
+            recording_shm, producer_pid, now_ms)) {
+        return 0;
+    }
+
+    width = recording_shm->source_w;
+    height = recording_shm->source_h;
+    dst_pixels = varnish_recording_begin_frame(
+        recording_shm, producer_pid, width, height,
+        &slot_index, NULL);
+    if (!dst_pixels)
+        return 0;
+
+    if (pfn_RenderReadPixels(renderer, NULL, VR_SDL_PIXELFORMAT_ARGB8888,
+                             dst_pixels, width * (int)sizeof(uint32_t)) != 0) {
+        varnish_recording_cancel_frame(recording_shm, slot_index);
+        return 0;
+    }
+
+    recording_force_alpha(dst_pixels, width, height);
+    varnish_recording_publish_frame(recording_shm, slot_index);
+    record_last_capture_ms = now_ms;
+    return 1;
+}
+
+static int capture_recording_gl_frame(void *window, uint32_t now_ms) {
+    uint32_t slot_index;
+    uint32_t *dst_pixels;
+    int32_t producer_pid;
+    int width;
+    int height;
+
+    if (!pfn_glReadPixels)
+        pfn_glReadPixels = (fn_glReadPixels)resolve_gl_symbol("glReadPixels");
+    if (!pfn_glReadPixels)
+        return 0;
+    if (!recording_capture_allowed(now_ms))
+        return 0;
+    producer_pid = (int32_t)getpid();
+    if (!varnish_recording_try_acquire_producer(
+            recording_shm, producer_pid, now_ms)) {
+        return 0;
+    }
+
+    width = recording_shm->source_w;
+    height = recording_shm->source_h;
+    if (pfn_SDL_GL_GetDrawableSize) {
+        int drawable_w = 0;
+        int drawable_h = 0;
+        pfn_SDL_GL_GetDrawableSize(window, &drawable_w, &drawable_h);
+        if (drawable_w > 0 && drawable_h > 0 &&
+            (drawable_w != width || drawable_h != height)) {
+            return 0;
+        }
+    }
+    if (width <= 0 || height <= 0 ||
+        width > VARNISH_RECORDING_MAX_W || height > VARNISH_RECORDING_MAX_H) {
+        return 0;
+    }
+
+    dst_pixels = varnish_recording_begin_frame(
+        recording_shm, producer_pid, width, height,
+        &slot_index, NULL);
+    if (!dst_pixels)
+        return 0;
+
+    pfn_glReadPixels(0, 0, width, height, VR_GL_RGBA, VR_GL_UNSIGNED_BYTE,
+                     record_gl_rgba);
+    for (int y = 0; y < height; y++) {
+        const uint8_t *src_row =
+            record_gl_rgba + (size_t)(height - 1 - y) * (size_t)width * 4u;
+        uint32_t *dst_row = dst_pixels + (size_t)y * (size_t)width;
+
+        for (int x = 0; x < width; x++) {
+            const uint8_t *src = src_row + (size_t)x * 4u;
+            dst_row[x] = 0xFF000000u |
+                         ((uint32_t)src[0] << 16) |
+                         ((uint32_t)src[1] << 8) |
+                         (uint32_t)src[2];
+        }
+    }
+
+    varnish_recording_publish_frame(recording_shm, slot_index);
+    record_last_capture_ms = now_ms;
+    return 1;
 }
 
 /* ── Per-slot seqlock read helpers ──────────────────────────────── */
@@ -1220,6 +1392,8 @@ void SDL_RenderPresent(void *renderer) {
     render_tid = current_tid();
 
     if (__builtin_expect(sdl_funcs_ok, 1)) {
+        now_ms = monotonic_now_ms();
+        capture_recording_sdl_frame(renderer, now_ms);
         count = collect_active_slots(order);
 
         if (count > 0) {
@@ -1227,7 +1401,6 @@ void SDL_RenderPresent(void *renderer) {
              * saved full frame so the next idle-present recaptures it.
              * Only per-slot region saves (small, fast) happen here. */
             full_frame_valid = 0;
-            now_ms = monotonic_now_ms();
             for (int i = 0; i < count; i++) {
                 if (slot_should_capture_background(renderer, order[i], now_ms))
                     save_slot_background(renderer, order[i], now_ms);
@@ -1246,6 +1419,8 @@ void SDL_RenderPresent(void *renderer) {
 }
 
 void SDL_GL_SwapWindow(void *window) {
+    uint32_t now_ms;
+
     if (__builtin_expect(!real_gl_swap, 0)) {
         real_gl_swap = (fn_SDL_GL_SwapWindow)resolve_symbol_any("SDL_GL_SwapWindow");
         if (!real_gl_swap)
@@ -1253,6 +1428,8 @@ void SDL_GL_SwapWindow(void *window) {
         init_sdl_funcs();
     }
 
+    now_ms = monotonic_now_ms();
+    capture_recording_gl_frame(window, now_ms);
     draw_all_gl_overlays(window);
     real_gl_swap(window);
 }

@@ -10,6 +10,7 @@
 #include "hotkeys.h"
 #include "ipc.h"
 #include "manual.h"
+#include "recording.h"
 #include "overlay.h"
 #include "screenshot.h"
 #include "shm.h"
@@ -41,6 +42,7 @@ typedef struct {
 static slot_state_t slots[VARNISH_MAX_SLOTS];
 static volatile sig_atomic_t quit_flag;
 static varnish_manual_session manual_session;
+static varnish_recording_session recording_session;
 
 /* ── Warmup (delay publishing during early boot) ───────────────── */
 
@@ -215,6 +217,62 @@ static void show_internal_pill(const char *text, int duration_secs) {
     handle_pill(&cmd);
 }
 
+static void hide_internal_pill(const char *client_id) {
+    ipc_cmd_t cmd = {0};
+
+    if (!client_id || !client_id[0])
+        return;
+
+    cmd.type = IPC_CMD_HIDE;
+    str_copy_trunc(cmd.client_id, sizeof(cmd.client_id), client_id);
+    handle_hide(&cmd);
+}
+
+static void show_recording_indicator(void) {
+    ipc_cmd_t cmd = {0};
+
+    cmd.type = IPC_CMD_PILL;
+    str_copy_trunc(cmd.client_id, sizeof(cmd.client_id), "varnish-rec");
+    str_copy_trunc(cmd.position, sizeof(cmd.position), "top-right");
+    str_copy_trunc(cmd.text, sizeof(cmd.text), "REC");
+    cmd.duration_secs = 0;
+    handle_pill(&cmd);
+}
+
+static void hide_recording_indicator(void) {
+    hide_internal_pill("varnish-rec");
+}
+
+static void handle_record_request(int mode) {
+    char message[320];
+    int started = 0;
+    int rc;
+
+    switch (mode) {
+        case IPC_CMD_RECORD_START:
+            rc = recording_start(&recording_session, message, sizeof(message));
+            started = (rc == 0);
+            break;
+        case IPC_CMD_RECORD_STOP:
+            rc = recording_stop(&recording_session, message, sizeof(message));
+            break;
+        default:
+            rc = recording_toggle(&recording_session, message, sizeof(message), &started);
+            break;
+    }
+
+    if (started && rc == 0) {
+        show_recording_indicator();
+        return;
+    }
+
+    if (!recording_session_active(&recording_session))
+        hide_recording_indicator();
+
+    if (message[0])
+        show_internal_pill(message, 3);
+}
+
 static void handle_hotkey_action(varnish_hotkey_action action) {
     char out_path[512];
     const char *filename;
@@ -228,6 +286,11 @@ static void handle_hotkey_action(varnish_hotkey_action action) {
         }
 
         hotkeys_runtime_set_paused(true);
+        return;
+    }
+
+    if (action == VARNISH_HOTKEY_ACTION_RECORD_TOGGLE) {
+        handle_record_request(IPC_CMD_RECORD_TOGGLE);
         return;
     }
 
@@ -313,6 +376,7 @@ static void daemonize(void) {
 int daemon_run(void) {
     int fb_width = 0, fb_height = 0;
     ipc_cmd_t cmd;
+    char recording_message[320];
 
     /* Daemonize (fork to background) */
     daemonize();
@@ -339,14 +403,19 @@ int daemon_run(void) {
         return 1;
     }
 
+    if (recording_init_transport(fb_width, fb_height) < 0)
+        fprintf(stderr, "varnish: recording transport unavailable\n");
+
     if (ipc_init() < 0) {
         fprintf(stderr, "varnish: ipc init failed, exiting\n");
+        recording_shutdown_transport();
         shm_cleanup();
         return 1;
     }
 
     overlay_init(fb_width, fb_height);
     hotkeys_runtime_init();
+    recording_session_init(&recording_session);
 
     /* Start warmup timer */
     warmup_start();
@@ -385,6 +454,11 @@ int daemon_run(void) {
             case IPC_CMD_HOTKEYS_RESUME:
                 hotkeys_runtime_set_paused(false);
                 break;
+            case IPC_CMD_RECORD_START:
+            case IPC_CMD_RECORD_STOP:
+            case IPC_CMD_RECORD_TOGGLE:
+                handle_record_request(cmd.type);
+                break;
             default:
                 break;
             }
@@ -393,6 +467,12 @@ int daemon_run(void) {
         /* Expire timed-out slots */
         warmup_update();
         slot_expire_tick();
+        if (recording_poll(&recording_session,
+                           recording_message, sizeof(recording_message)) != 0) {
+            hide_recording_indicator();
+            if (recording_message[0])
+                show_internal_pill(recording_message, 3);
+        }
         if (manual_session_poll(&manual_session))
             hotkeys_runtime_set_paused(false);
         handle_hotkey_action(hotkeys_runtime_poll());
@@ -404,10 +484,14 @@ int daemon_run(void) {
     /* ── Cleanup ───────────────────────────────────────────────── */
 
     fprintf(stderr, "varnish: daemon shutting down\n");
+    if (recording_session_active(&recording_session))
+        (void)recording_stop(&recording_session, NULL, 0);
+    hide_recording_indicator();
     manual_session_abort(&manual_session);
     slot_clear_all();
     hotkeys_runtime_cleanup();
     overlay_cleanup();
+    recording_shutdown_transport();
     shm_cleanup();
     ipc_cleanup();
 

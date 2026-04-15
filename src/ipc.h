@@ -22,6 +22,9 @@ typedef enum {
     IPC_CMD_HOTKEYS_RELOAD,
     IPC_CMD_HOTKEYS_PAUSE,
     IPC_CMD_HOTKEYS_RESUME,
+    IPC_CMD_RECORD_START,
+    IPC_CMD_RECORD_STOP,
+    IPC_CMD_RECORD_TOGGLE,
 } ipc_cmd_type_t;
 
 typedef struct {
@@ -45,5 +48,8 @@ int  ipc_send_clear(void);
 int  ipc_hotkeys_reload(void);
 int  ipc_hotkeys_pause(void);
 int  ipc_hotkeys_resume(void);
+int  ipc_record_start(void);
+int  ipc_record_stop(void);
+int  ipc_record_toggle(void);
 
 #endif /* VARNISH_IPC_H */

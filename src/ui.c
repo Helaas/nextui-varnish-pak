@@ -236,12 +236,16 @@ static void ui_run_hotkeys_menu(void) {
     for (;;) {
         char screenshot_text[64];
         char manual_text[64];
-        char help_text[192];
+        char record_text[64];
+        char help_text[256];
         ap_option screenshot_value[] = {
             { .label = screenshot_text, .value = screenshot_text },
         };
         ap_option manual_value[] = {
             { .label = manual_text, .value = manual_text },
+        };
+        ap_option record_value[] = {
+            { .label = record_text, .value = record_text },
         };
         ap_options_item items[] = {
             {
@@ -255,6 +259,13 @@ static void ui_run_hotkeys_menu(void) {
                 .label = "Manual",
                 .type = AP_OPT_CLICKABLE,
                 .options = manual_value,
+                .option_count = 1,
+                .selected_option = 0,
+            },
+            {
+                .label = "Record Video",
+                .type = AP_OPT_CLICKABLE,
+                .options = record_value,
                 .option_count = 1,
                 .selected_option = 0,
             },
@@ -272,14 +283,15 @@ static void ui_run_hotkeys_menu(void) {
 
         ui_format_binding(draft.screenshot_mask, screenshot_text, sizeof(screenshot_text));
         ui_format_binding(draft.manual_mask, manual_text, sizeof(manual_text));
+        ui_format_binding(draft.record_mask, record_text, sizeof(record_text));
         snprintf(help_text, sizeof(help_text),
-                 "Define global button chords.\n\nScreenshot: %s\nManual: %s",
-                 screenshot_text, manual_text);
+                 "Define global button chords.\n\nScreenshot: %s\nManual: %s\nRecord Video: %s",
+                 screenshot_text, manual_text, record_text);
 
         opts = (ap_options_list_opts) {
             .title = "Hotkeys",
             .items = items,
-            .item_count = 2,
+            .item_count = 3,
             .footer = footer,
             .footer_count = 4,
             .action_button = AP_BTN_X,
@@ -297,6 +309,8 @@ static void ui_run_hotkeys_menu(void) {
                 draft.screenshot_mask = 0u;
             else if (result.focused_index == 1)
                 draft.manual_mask = 0u;
+            else if (result.focused_index == 2)
+                draft.record_mask = 0u;
             continue;
         }
 
@@ -317,6 +331,8 @@ static void ui_run_hotkeys_menu(void) {
                     draft.screenshot_mask = captured_mask;
                 else if (result.focused_index == 1)
                     draft.manual_mask = captured_mask;
+                else if (result.focused_index == 2)
+                    draft.record_mask = captured_mask;
             }
         }
     }
@@ -336,7 +352,8 @@ int ui_run(const char *self_path) {
         varnish_hotkey_config hotkey_config;
         char screenshot_text[64];
         char manual_text[64];
-        char help_text[320];
+        char record_text[64];
+        char help_text[384];
         ap_option enabled_options[] = {
             { .label = "Off", .value = "0" },
             { .label = "On",  .value = "1" },
@@ -375,6 +392,7 @@ int ui_run(const char *self_path) {
         ui_format_binding(hotkey_config.screenshot_mask,
                           screenshot_text, sizeof(screenshot_text));
         ui_format_binding(hotkey_config.manual_mask, manual_text, sizeof(manual_text));
+        ui_format_binding(hotkey_config.record_mask, record_text, sizeof(record_text));
 
         items[0].selected_option = want_enabled ? 1 : 0;
         control_format_status(&status, help_text, sizeof(help_text));
@@ -382,6 +400,8 @@ int ui_run(const char *self_path) {
         str_append(help_text, sizeof(help_text), screenshot_text);
         str_append(help_text, sizeof(help_text), "\nManual: ");
         str_append(help_text, sizeof(help_text), manual_text);
+        str_append(help_text, sizeof(help_text), "\nRecord Video: ");
+        str_append(help_text, sizeof(help_text), record_text);
 
         opts = (ap_options_list_opts) {
             .title = "Varnish",
