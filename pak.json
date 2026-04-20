@@ -1,0 +1,7 @@
+{
+  "name": "Varnish",
+  "version": "v0.1.0",
+  "type": "TOOL",
+  "description": "Reusable SDL overlay system for NextUI Paks. Provides flicker-free on-screen notifications via LD_PRELOAD compositing.",
+  "platforms": ["tg5040", "tg5050", "my355"]
+}
